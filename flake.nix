@@ -6,69 +6,40 @@
     extra-trusted-public-keys = [ "unpins.cachix.org-1:DDaShjbZ8VvcqxeTcAU3kV9vxZQBlyb7V/uLBHfTynI=" ];
   };
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    unpins-lib.url = "github:unpins/nix-lib/v1";
-  };
+  inputs.unpins-lib.url = "github:unpins/nix-lib";
 
-  outputs = { self, nixpkgs, unpins-lib }:
+  outputs = { self, unpins-lib }:
     let
-      lib = nixpkgs.lib;
       ulib = unpins-lib.lib;
 
-      # allowUnsupportedSystem: pkgsStatic.libpulseaudio's meta.platforms
-      # excludes x86_64-linux. We never depend on it (withPulse is false)
-      # but the platform check fires during eval before dep culling.
-      pkgsFor = system: import nixpkgs {
-        inherit system;
-        config.allowUnsupportedSystem = true;
-      };
-
       # ---------------------------------------------------------------------
-      # Codec libs static-flipped, parameterized by package set.
-      # Used by both native (pkgsStatic) and Windows (pkgsCross.mingwW64).
-      # Helpers from `unpins-lib`: keepStatic* are cache-aware no-ops
-      # under pkgsStatic so cache.nixos.org hits are preserved.
+      # Codec libs, parameterized by package set. Used by both native
+      # (pkgsStatic) and Windows (mingwStaticCross). The stdenv-level
+      # makeStaticLibraries adapter takes care of autotools/cmake/meson
+      # libs (bzip2, xz, libiconv, libogg, libopus, lame, zimg, dav1d),
+      # so they're inherited unmodified from `pkgs`.
       #
-      # x264.pc fix is applied always — nixpkgs packaging decision
-      # independent of static/shared, breaks ffmpeg's static link probe.
+      # zlib and x264 escape that adapter (custom builders/configure);
+      # their static fix lives in nix-lib's `applyPackageFix`, applied
+      # here as a no-op under pkgsStatic.
+      #
+      # libvorbis on mingw needs its libogg input pinned: vorbis.pc
+      # references libogg's pkgconfig dir, but cached cross libogg is
+      # shared-by-default. Pin our static-cross libogg so vorbis
+      # resolves against an .a.
       # ---------------------------------------------------------------------
       mkCodecLibs = pkgs:
         let
           isStatic = pkgs.stdenv.hostPlatform.isStatic or false;
         in
         rec {
-          zlib       = ulib.keepStaticZlib  pkgs pkgs.zlib;
-          bzip2      = ulib.keepStaticAuto  pkgs pkgs.bzip2;
-          xz         = ulib.keepStaticAuto  pkgs pkgs.xz;
-          libiconv   = ulib.keepStaticAuto  pkgs pkgs.libiconv;
-          libogg     = ulib.keepStaticCmake pkgs [] pkgs.libogg;
-          libvorbis  =
+          inherit (pkgs) bzip2 xz libiconv libogg libopus lame zimg dav1d;
+          zlib = ulib.applyPackageFix pkgs "zlib" pkgs.zlib;
+          x264 = ulib.applyPackageFix pkgs "x264" pkgs.x264;
+          libvorbis =
             if isStatic
             then pkgs.libvorbis
-            # Cross-mingw: pin our static libogg so vorbis.pc resolves
-            # to the libogg whose lib/ has libogg.a.
-            else ulib.keepStaticAuto pkgs (pkgs.libvorbis.override {
-              inherit libogg;
-            });
-          libopus    = ulib.keepStaticMeson pkgs pkgs.libopus;
-          lame       = ulib.keepStaticAuto  pkgs pkgs.lame;
-          zimg       = ulib.keepStaticAuto  pkgs pkgs.zimg;
-          # x264 always needs the .pc patch. For non-static, also force
-          # static-only build (otherwise x264.h's `__declspec(dllimport)`
-          # makes ffmpeg link probe look for `__imp_x264_*`).
-          x264       = pkgs.x264.overrideAttrs (old: {
-            configureFlags = (old.configureFlags or [])
-              ++ lib.optionals (!isStatic)
-                [ "--enable-static" "--disable-shared" "--enable-pic" ];
-            postFixup = (old.postFixup or "") + ''
-              for d in "$dev" "$out"; do
-                pc="$d/lib/pkgconfig/x264.pc"
-                [ -f "$pc" ] && sed -i 's| -DX264_API_IMPORTS||g' "$pc" || true
-              done
-            '';
-          });
-          dav1d      = ulib.keepStaticMeson pkgs pkgs.dav1d;
+            else pkgs.libvorbis.override { inherit libogg; };
         };
 
       # Common ffmpeg ./configure flags (shared by native + Windows).
@@ -101,6 +72,10 @@
         --enable-libmp3lame \
         --enable-libzimg
       '';
+    in
+    ulib.mkStandaloneFlake {
+      inherit self;
+      name = "ffmpeg";
 
       # ---------------------------------------------------------------------
       # Native build: from-source ffmpeg via pkgsStatic. Bypassing
@@ -109,9 +84,8 @@
       # have their own pkgsStatic build issues. We list only the
       # codecs we actually want.
       # ---------------------------------------------------------------------
-      mkNative = system:
+      build = pkgs:
         let
-          pkgs = pkgsFor system;
           static = mkCodecLibs pkgs.pkgsStatic;
           version = pkgs.ffmpeg-headless.version;
           ffmpegSrc = pkgs.ffmpeg-headless.src;
@@ -171,16 +145,13 @@
 
       # ---------------------------------------------------------------------
       # Windows build: from-source ffmpeg cross-compiled via MinGW.
-      # Same codec-libs strategy as native, just sourced from
-      # pkgsCross.mingwW64 instead of pkgsStatic.
+      # Same codec-libs strategy as native, sourced from mingwStaticCross
+      # so every dep (autotools/cmake/meson) builds static-only via the
+      # shared makeStaticLibraries adapter.
       # ---------------------------------------------------------------------
-      mkWindows = buildSystem:
+      windowsBuild = pkgs:
         let
-          pkgs = import nixpkgs {
-            system = buildSystem;
-            config.allowUnsupportedSystem = true;
-          };
-          cross = pkgs.pkgsCross.mingwW64;
+          cross = ulib.mingwStaticCross pkgs;
           static = mkCodecLibs cross;
           version = pkgs.ffmpeg-headless.version;
           ffmpegSrc = pkgs.ffmpeg-headless.src;
@@ -241,25 +212,11 @@
 
           passthru = { pname = "ffmpeg"; inherit version; };
 
-          meta = with lib; {
+          meta = with pkgs.lib; {
             description = "FFmpeg headless, statically linked MinGW build";
             platforms = [ "x86_64-linux" ];
             mainProgram = "ffmpeg";
           };
         };
-    in
-    {
-      packages = lib.recursiveUpdate
-        (ulib.forAllNative (system: { default = mkNative system; }))
-        {
-          x86_64-linux."windows-x86_64" = mkWindows "x86_64-linux";
-        };
-
-      apps = ulib.forAllNative (system: {
-        default = {
-          type = "app";
-          program = "${self.packages.${system}.default}/bin/ffmpeg";
-        };
-      });
     };
 }
