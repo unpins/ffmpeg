@@ -12,211 +12,97 @@
     let
       ulib = unpins-lib.lib;
 
-      # ---------------------------------------------------------------------
-      # Codec libs, parameterized by package set. Used by both native
-      # (pkgsStatic) and Windows (mingwStaticCross). The stdenv-level
-      # makeStaticLibraries adapter takes care of autotools/cmake/meson
-      # libs (bzip2, xz, libiconv, libogg, libopus, lame, zimg, dav1d),
-      # so they're inherited unmodified from `pkgs`.
-      #
-      # zlib and x264 escape that adapter (custom builders/configure);
-      # their static fix lives in nix-lib's `applyPackageFix`, applied
-      # here as a no-op under pkgsStatic.
-      #
-      # libvorbis on mingw needs its libogg input pinned: vorbis.pc
-      # references libogg's pkgconfig dir, but cached cross libogg is
-      # shared-by-default. Pin our static-cross libogg so vorbis
-      # resolves against an .a.
-      # ---------------------------------------------------------------------
-      mkCodecLibs = pkgs:
+      # nixpkgs's pkgsStatic.ffmpeg-headless pulls openapv/ocl-icd/
+      # libtiff/libsndfile etc — codec deps that break under pkgsStatic.
+      # We ship only the codecs we want and run configure ourselves.
+      mkFfmpeg = pkgs:
+        { extraConfigureFlags ? [ ]
+        , extraInputs ? [ ]
+        }:
         let
-          isStatic = pkgs.stdenv.hostPlatform.isStatic or false;
+          stdenv = pkgs.stdenv;
+          isMinGW = stdenv.hostPlatform.isMinGW or false;
+          isDarwin = stdenv.hostPlatform.isDarwin;
+          targetOs =
+            if isMinGW then "mingw64"
+            else if isDarwin then "darwin"
+            else "linux";
+          exe = if isMinGW then ".exe" else "";
+          flags = [
+            "--prefix=$out"
+            "--cross-prefix=${stdenv.hostPlatform.config}-"
+            "--host-cc=${pkgs.buildPackages.stdenv.cc}/bin/cc"
+            "--enable-cross-compile"
+            "--target-os=${targetOs}"
+            "--arch=${stdenv.hostPlatform.uname.processor}"
+            # ffmpeg's configure auto-derives pkg-config as
+            # `${cross_prefix}pkg-config` — the binary the wrapper
+            # actually ships. Don't pass `--pkg-config=pkg-config`
+            # or it looks for a bare `pkg-config` that isn't in PATH.
+            "--pkg-config-flags=--static"
+            "--extra-ldflags=-static"
+            "--enable-static" "--disable-shared"
+            "--disable-doc" "--disable-htmlpages" "--disable-manpages"
+            "--disable-podpages" "--disable-txtpages"
+            "--disable-debug" "--disable-stripping"
+            "--enable-gpl" "--enable-version3"
+            "--enable-runtime-cpudetect" "--enable-network"
+            "--disable-ffplay" "--enable-ffmpeg" "--enable-ffprobe"
+            "--enable-zlib" "--enable-bzlib" "--enable-lzma" "--enable-iconv"
+            "--enable-libx264" "--enable-libdav1d" "--enable-libopus"
+            "--enable-libvorbis" "--enable-libmp3lame" "--enable-libzimg"
+          ] ++ extraConfigureFlags;
         in
-        rec {
-          inherit (pkgs) bzip2 xz libiconv libogg libopus lame zimg dav1d;
-          zlib = ulib.applyPackageFix pkgs "zlib" pkgs.zlib;
-          x264 = ulib.applyPackageFix pkgs "x264" pkgs.x264;
-          libvorbis =
-            if isStatic
-            then pkgs.libvorbis
-            else pkgs.libvorbis.override { inherit libogg; };
-        };
+        stdenv.mkDerivation {
+          pname = "ffmpeg";
+          inherit (pkgs.ffmpeg-headless) version src;
 
-      # Common ffmpeg ./configure flags (shared by native + Windows).
-      ffmpegConfigureCommon = ''
-        --pkg-config=pkg-config \
-        --pkg-config-flags=--static \
-        --extra-ldflags=-static \
-        --disable-doc \
-        --disable-htmlpages \
-        --disable-manpages \
-        --disable-podpages \
-        --disable-txtpages \
-        --disable-debug \
-        --disable-stripping \
-        --enable-gpl \
-        --enable-version3 \
-        --enable-runtime-cpudetect \
-        --enable-network \
-        --disable-ffplay \
-        --enable-ffmpeg \
-        --enable-ffprobe \
-        --enable-zlib \
-        --enable-bzlib \
-        --enable-lzma \
-        --enable-iconv \
-        --enable-libx264 \
-        --enable-libdav1d \
-        --enable-libopus \
-        --enable-libvorbis \
-        --enable-libmp3lame \
-        --enable-libzimg
-      '';
+          nativeBuildInputs = with pkgs.buildPackages; [ pkg-config nasm yasm perl ];
+          buildInputs = (with pkgs; [
+            zlib bzip2 xz libiconv x264 dav1d libopus libvorbis libogg lame zimg
+          ]) ++ extraInputs;
+
+          strictDeps = true;
+          enableParallelBuilding = true;
+          stripAllList = [ "bin" ];
+
+          configurePhase = ''
+            runHook preConfigure
+            # ffmpeg's `require_cpp_condition` for x264 trips on the
+            # default x264.h header decoration; drop the check.
+            sed -i '/X264_API_IMPORTS/d' configure
+            ./configure ${builtins.concatStringsSep " " flags}
+            runHook postConfigure
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            cp ffmpeg${exe} ffprobe${exe} $out/bin/
+            runHook postInstall
+          '';
+
+          passthru = { pname = "ffmpeg"; inherit (pkgs.ffmpeg-headless) version; };
+        };
     in
     ulib.mkStandaloneFlake {
       inherit self;
       name = "ffmpeg";
 
-      # ---------------------------------------------------------------------
-      # Native build: from-source ffmpeg via pkgsStatic. Bypassing
-      # nixpkgs's pkgsStatic.ffmpeg-headless avoids its hardcoded
-      # codec deps (openapv, ocl-icd, libtiff, libsndfile, ...) which
-      # have their own pkgsStatic build issues. We list only the
-      # codecs we actually want.
-      # ---------------------------------------------------------------------
-      build = pkgs:
-        let
-          static = mkCodecLibs pkgs.pkgsStatic;
-          version = pkgs.ffmpeg-headless.version;
-          ffmpegSrc = pkgs.ffmpeg-headless.src;
-          isDarwin = pkgs.stdenv.isDarwin;
-        in
-        pkgs.pkgsStatic.stdenv.mkDerivation {
-          pname = "ffmpeg";
-          inherit version;
-          src = ffmpegSrc;
+      # darwin's libSystem doesn't ship libpthread.a so --enable-pthreads
+      # breaks the configure probe; linux is fine.
+      build = pkgs: mkFfmpeg pkgs.pkgsStatic {
+        extraConfigureFlags =
+          if pkgs.stdenv.isDarwin then [ ] else [ "--enable-pthreads" ];
+      };
 
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            nasm
-            yasm
-            perl
-          ];
-
-          buildInputs = builtins.attrValues static;
-
-          strictDeps = true;
-          enableParallelBuilding = true;
-
-          configurePhase = ''
-            runHook preConfigure
-
-            sed -i '/X264_API_IMPORTS/d' configure
-
-            # pkgsStatic.stdenv.cc only ships prefixed binaries
-            # (e.g. x86_64-unknown-linux-musl-gcc) — use --cross-prefix.
-            # No ERR trap: ffmpeg's configure has its own probe failure
-            # handling and trap intercepts internal non-zero exits.
-            ./configure \
-              --prefix=$out \
-              --cross-prefix=${ulib.crossPrefix pkgs.pkgsStatic} \
-              --host-cc=${pkgs.stdenv.cc}/bin/cc \
-              --enable-cross-compile \
-              --target-os=${if isDarwin then "darwin" else "linux"} \
-              --arch=${pkgs.stdenv.hostPlatform.uname.processor} \
-              --enable-static \
-              --disable-shared \
-              ${if isDarwin then "" else "--enable-pthreads \\"}
-              ${ffmpegConfigureCommon}
-
-            runHook postConfigure
-          '';
-
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/bin
-            cp ffmpeg ffprobe $out/bin/
-            ${pkgs.pkgsStatic.stdenv.hostPlatform.config}-strip $out/bin/ffmpeg $out/bin/ffprobe
-            runHook postInstall
-          '';
-
-          passthru = { pname = "ffmpeg"; inherit version; };
-        };
-
-      # ---------------------------------------------------------------------
-      # Windows build: from-source ffmpeg cross-compiled via MinGW.
-      # Same codec-libs strategy as native, sourced from mingwStaticCross
-      # so every dep (autotools/cmake/meson) builds static-only via the
-      # shared makeStaticLibraries adapter.
-      # ---------------------------------------------------------------------
+      # mingw: force pthreads (not w32threads) to match downstream codec
+      # libs (x264, dav1d) that were built against pthreads.
       windowsBuild = pkgs:
-        let
-          cross = ulib.mingwStaticCross pkgs;
-          static = mkCodecLibs cross;
-          version = pkgs.ffmpeg-headless.version;
-          ffmpegSrc = pkgs.ffmpeg-headless.src;
-        in
-        cross.stdenv.mkDerivation {
-          pname = "ffmpeg";
-          inherit version;
-          src = ffmpegSrc;
-
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            nasm
-            yasm
-            perl
-          ];
-
-          buildInputs = (builtins.attrValues static) ++ [
-            cross.windows.pthreads
-          ];
-
-          strictDeps = true;
-          enableParallelBuilding = true;
-
-          configurePhase = ''
-            runHook preConfigure
-
-            cleanup_on_fail() {
-              echo "=== ffbuild/config.log (last 200 lines) ===" >&2
-              tail -200 ffbuild/config.log >&2 || true
-            }
-            trap cleanup_on_fail ERR
-
-            sed -i '/X264_API_IMPORTS/d' configure
-
-            ./configure \
-              --prefix=$out \
-              --target-os=mingw64 \
-              --arch=x86_64 \
-              --cross-prefix=x86_64-w64-mingw32- \
-              --enable-cross-compile \
-              --host-cc=${pkgs.stdenv.cc}/bin/cc \
-              --disable-w32threads \
-              --enable-pthreads \
-              --enable-static \
-              --disable-shared \
-              ${ffmpegConfigureCommon}
-
-            runHook postConfigure
-          '';
-
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/bin
-            cp ffmpeg.exe ffprobe.exe $out/bin/
-            x86_64-w64-mingw32-strip $out/bin/ffmpeg.exe $out/bin/ffprobe.exe
-            runHook postInstall
-          '';
-
-          passthru = { pname = "ffmpeg"; inherit version; };
-
-          meta = with pkgs.lib; {
-            description = "FFmpeg headless, statically linked MinGW build";
-            platforms = [ "x86_64-linux" ];
-            mainProgram = "ffmpeg";
-          };
+        let cross = ulib.mingwStaticCross pkgs; in
+        mkFfmpeg cross {
+          extraConfigureFlags = [ "--disable-w32threads" "--enable-pthreads" ];
+          extraInputs = [ cross.windows.pthreads ];
         };
     };
 }
