@@ -59,8 +59,8 @@
 
           nativeBuildInputs = with pkgs.buildPackages; [ pkg-config nasm yasm perl ];
           buildInputs = (with pkgs; [
-            zlib bzip2 xz libiconv x264 dav1d libopus libvorbis libogg lame zimg
-          ]) ++ extraInputs;
+            zlib bzip2 xz libiconv x264 dav1d libvorbis libogg lame zimg
+          ]) ++ [ (ulib.nativeFixes.libopus pkgs) ] ++ extraInputs;
 
           strictDeps = true;
           enableParallelBuilding = true;
