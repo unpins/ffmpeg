@@ -71,13 +71,19 @@
           pname = "ffmpeg";
           inherit (pkgs.ffmpeg-headless) version src;
 
-          # Splicing: `pkgs.X` in nativeBuildInputs picks the right cross
-          # variant. `pkgs.buildPackages.X` here gave us arm64-apple-darwin-
-          # pkg-config-wrapper for the x86_64-darwin cross — ffmpeg derived
-          # `--pkg-config=x86_64-apple-darwin-pkg-config` (not present),
-          # silently set pkg_config=false, every probe returned "not found".
-          # See nix-lib memory feedback_nixpkgs_splicing_native_build_inputs.
-          nativeBuildInputs = with pkgs; [ pkg-config nasm yasm perl ];
+          # pkgsBuildHost is the canonical "build tools that target host"
+          # scope:
+          #   linux x86_64-linux native → x86_64-unknown-linux-musl-pkg-config
+          #   mingw cross            → x86_64-w64-mingw32-pkg-config
+          #   darwin x86_64-darwin cross from arm64-darwin
+          #                          → x86_64-apple-darwin-pkg-config
+          # ffmpeg's --cross-prefix=<triple>- derives a `<triple>-pkg-config`
+          # binary that has to be on PATH; pkgsBuildHost.pkg-config is named
+          # to match. `pkgs.buildPackages` picks the BUILD platform's wrapper
+          # (wrong triple), and `pkgs.X` with no scope is static + unprefixed.
+          # Also: pkgsBuildHost.perl is non-static (build-time tool) — `pkgs`
+          # in cross-darwin-pkgsStatic gives perl-static which fails to build.
+          nativeBuildInputs = with pkgs.pkgsBuildHost; [ pkg-config nasm yasm perl ];
           buildInputs = (with pkgs; [
             zlib bzip2 xz libiconv x264 libvorbis libogg lame zimg
           ]) ++ [
