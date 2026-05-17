@@ -37,6 +37,15 @@
             # exists across both clang and gcc nixpkgs cc-wrappers.
             "--cc=${stdenv.hostPlatform.config}-cc"
             "--host-cc=${pkgs.buildPackages.stdenv.cc}/bin/cc"
+            # Hard-reference the cross pkg-config wrapper. Splicing in
+            # nativeBuildInputs picks the BUILD-platform wrapper (named
+            # after build triple), and ffmpeg's auto-derive (cross_prefix
+            # + "pkg-config") expects a HOST-triple binary — match never
+            # happens, pkg_config silently becomes "false", every probe
+            # returns "not found". `pkgsBuildHost.pkg-config` (default,
+            # pre-splicing) IS the host-triple wrapper; reference it by
+            # explicit /bin path to bypass the splicing rewrite.
+            "--pkg-config=${pkgs.pkgsBuildHost.pkg-config}/bin/${stdenv.hostPlatform.config}-pkg-config"
             "--enable-cross-compile"
             "--target-os=${targetOs}"
             "--arch=${stdenv.hostPlatform.uname.processor}"
