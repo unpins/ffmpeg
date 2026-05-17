@@ -71,7 +71,13 @@
           pname = "ffmpeg";
           inherit (pkgs.ffmpeg-headless) version src;
 
-          nativeBuildInputs = with pkgs.buildPackages; [ pkg-config nasm yasm perl ];
+          # Splicing: `pkgs.X` in nativeBuildInputs picks the right cross
+          # variant. `pkgs.buildPackages.X` here gave us arm64-apple-darwin-
+          # pkg-config-wrapper for the x86_64-darwin cross — ffmpeg derived
+          # `--pkg-config=x86_64-apple-darwin-pkg-config` (not present),
+          # silently set pkg_config=false, every probe returned "not found".
+          # See nix-lib memory feedback_nixpkgs_splicing_native_build_inputs.
+          nativeBuildInputs = with pkgs; [ pkg-config nasm yasm perl ];
           buildInputs = (with pkgs; [
             zlib bzip2 xz libiconv x264 libvorbis libogg lame zimg
           ]) ++ [
