@@ -31,6 +31,11 @@
           flags = [
             "--prefix=$out"
             "--cross-prefix=${stdenv.hostPlatform.config}-"
+            # ffmpeg's cc_default="gcc" — appended after cross-prefix
+            # this gives `arm64-apple-darwin-gcc`, which doesn't exist
+            # on darwin (clang backend). Force the wrapper symlink that
+            # exists across both clang and gcc nixpkgs cc-wrappers.
+            "--cc=${stdenv.hostPlatform.config}-cc"
             "--host-cc=${pkgs.buildPackages.stdenv.cc}/bin/cc"
             "--enable-cross-compile"
             "--target-os=${targetOs}"
