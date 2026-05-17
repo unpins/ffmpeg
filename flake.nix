@@ -40,7 +40,6 @@
             # actually ships. Don't pass `--pkg-config=pkg-config`
             # or it looks for a bare `pkg-config` that isn't in PATH.
             "--pkg-config-flags=--static"
-            "--enable-static" "--disable-shared"
             "--disable-doc" "--disable-htmlpages" "--disable-manpages"
             "--disable-podpages" "--disable-txtpages"
             "--disable-debug" "--disable-stripping"
@@ -51,14 +50,16 @@
             "--enable-libx264" "--enable-libdav1d" "--enable-libopus"
             "--enable-libvorbis" "--enable-libmp3lame" "--enable-libzimg"
           ]
-          # On darwin, `-extra-ldflags=-static` makes ffmpeg's compiler
-          # probe link `cc -static main.c` which fails because Apple
-          # ships only libSystem.dylib (no libSystem.a). The dep .a's
-          # are still picked from pkgsStatic by ld preference; libSystem
-          # stays implicit-dynamic per the catalog's darwin policy
-          # (docs/dynamic-link-policy.md). Linux/mingw require `-static`
-          # to force the final link.
-          ++ (if isDarwin then [ ] else [ "--extra-ldflags=-static" ])
+          # darwin can't take any "-static" linker flag (Apple ships
+          # only libSystem.dylib — no libSystem.a, so the compiler probe
+          # `cc -static main.c` aborts configure). On darwin we rely on
+          # ld picking the dep .a's by preference and let libSystem stay
+          # implicit-dynamic per docs/dynamic-link-policy.md. ffmpeg
+          # reinterprets `--enable-static --disable-shared` as
+          # LDFLAGS=-static internally (same trap that hit htop / tmux),
+          # so omit those too on darwin.
+          ++ (if isDarwin then [ ]
+              else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ])
           ++ extraConfigureFlags;
         in
         stdenv.mkDerivation {
