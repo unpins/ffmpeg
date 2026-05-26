@@ -353,6 +353,39 @@
           librsvgStatic = pkgs.pkgsStatic.librsvg.overrideAttrs (oa: {
             buildInputs = (oa.buildInputs or [ ]) ++ [ pkgs.pkgsStatic.libunwind ];
           });
+          # nixpkgs `pkgsStatic.rubberband` pulls vamp-plugin-sdk + lv2
+          # + ladspa-header + jdk_headless as build inputs because the
+          # upstream Makefile *emits* a Vamp plugin / LADSPA plugin / LV2
+          # plugin / Java JNI binding as side-targets. The core
+          # `librubberband.a` doesn't consume any of them at link time —
+          # they're separate `.so` outputs the build produces from the
+          # same source tree. In pkgsStatic, the Vamp SDK's Makefile
+          # unconditionally links `libvamp-sdk.so` (no SHARED-toggle knob),
+          # which fails crtbeginT.o R_X86_64_32 — the now-familiar static-
+          # PIE-in-shared-object trap. Disabling all four side-plugins
+          # at meson configure (`-Dvamp=disabled` etc) drops every dep
+          # we don't need and reduces the chain to fftw + libsamplerate.
+          # propagatedBuildInputs must also be replaced (not extended) —
+          # pkgsStatic auto-promotes upstream buildInputs into it, see
+          # [[pkgsstatic-propagated-buildinputs]] /
+          # [[srt-pkgsstatic-mbedtls-swap]].
+          rubberbandLean = pkgs.pkgsStatic.rubberband.overrideAttrs (oa: {
+            nativeBuildInputs = builtins.filter
+              (d: !(d.pname or null == "openjdk-headless"))
+              (oa.nativeBuildInputs or [ ]);
+            buildInputs = with pkgs.pkgsStatic; [ fftw libsamplerate ];
+            propagatedBuildInputs = with pkgs.pkgsStatic; [ fftw libsamplerate ];
+            mesonFlags = (oa.mesonFlags or [ ]) ++ [
+              "-Dvamp=disabled"
+              "-Dladspa=disabled"
+              "-Dlv2=disabled"
+              "-Djni=disabled"
+              "-Dcmdline=disabled"
+              "-Dtests=disabled"
+              "-Dfft=fftw"
+              "-Dresampler=libsamplerate"
+            ];
+          });
           x265Static = pkgs.pkgsStatic.x265.overrideAttrs (oa: {
             postBuild = (oa.postBuild or "") + ''
               echo "merging libx265.a + libx265-10.a + libx265-12.a → unified libx265.a"
@@ -399,6 +432,8 @@
                 "--enable-libopencore-amrnb"
                 "--enable-libopencore-amrwb"
                 "--enable-librsvg"
+                "--enable-libvidstab"
+                "--enable-librubberband"
               ];
               # Multi-output deps need both outputs in buildInputs:
               # `out` (the .a) plus `.dev` (the .pc + headers). Without
@@ -421,7 +456,8 @@
                 speex        speex.dev
                 fontconfig   fontconfig.dev
                 opencore-amr
-              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind ];
+                vid-stab
+              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean ];
             } else { flags = [ ]; inputs = [ ]; };
         in
         mkFfmpeg pkgs.pkgsStatic {

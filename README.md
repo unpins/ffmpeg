@@ -51,7 +51,7 @@ On **Linux** the binary additionally includes:
 - **Manifests:** libxml2 (DASH / HLS)
 - **Streaming protocols:** SRT (libsrt), SFTP (libssh), RTMP/RTMPS (librtmp + ffmpeg-internal mbedtls), RIST (librist)
 - **Discs:** libbluray
-- **Filters:** libqrencode (QR code overlay / source)
+- **Filters:** libqrencode (QR code overlay / source), libvidstab (video stabilization), librubberband (audio time-stretch / pitch-shift)
 
 The smaller macOS / Windows feature set keeps the package working on the cross-platform pkgsStatic toolchain that powers this build. Extending the extras across all targets is tracked separately.
 
