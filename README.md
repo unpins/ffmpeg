@@ -44,14 +44,14 @@ On **Linux** the binary additionally includes:
 - **TLS / HTTPS:** mbedtls
 - **Video encoders:** SVT-AV1, x265 (8/10/12-bit), libvpx (VP8/VP9), libxvid, libtheora, libaom
 - **Audio encoders:** libtwolame (MP2), libspeex, libopencore-amrnb
-- **Audio decoders:** libopencore-amrwb, libmodplug
+- **Audio decoders:** libopencore-amrwb, libopenmpt (tracker formats: MOD/XM/IT/S3M/MPTM/...)
 - **Audio processing:** libsoxr resampler
 - **Image:** libwebp, libopenjpeg (JPEG 2000), librsvg (SVG → raster)
 - **Subtitles:** libass + freetype + harfbuzz + fribidi + fontconfig
 - **Manifests:** libxml2 (DASH / HLS)
 - **Streaming protocols:** SRT (libsrt), SFTP (libssh), RTMP/RTMPS (librtmp + ffmpeg-internal mbedtls), RIST (librist)
 - **Discs:** libbluray
-- **Filters:** libqrencode (QR code overlay / source), libvidstab (video stabilization), librubberband (audio time-stretch / pitch-shift)
+- **Filters:** libqrencode (QR code overlay / source), libquirc (QR code decoder), libvidstab (video stabilization), librubberband (audio time-stretch / pitch-shift), libbs2b (Bauer stereo crossfeed for headphones), libmysofa (HRTF spatial audio via SOFAlizer)
 - **Demuxers:** libgme (NES / SNES / Genesis / GameBoy / MSX chiptune), libcdio (audio CD / CDDA grabbing via libcdio-paranoia)
 - **Captions:** libzvbi (DVB teletext + VBI closed captions)
 - **Fingerprint:** chromaprint muxer (AcoustID-compatible audio fingerprint)

@@ -423,6 +423,98 @@
           # install ao subdir `caca/` (que tem o .a + caca.pc + headers,
           # tudo que ffmpeg precisa). Outputs vão pra ["out" "dev"] (sem
           # `bin` porque não buildamos `tools/caca-config`).
+          # nixpkgs `pkgsStatic.quirc`: Makefile `all` builda
+          # `libquirc.so + qrtest` por default; em pkgsStatic o .so
+          # falha com `R_X86_64_32 against __TMC_END__` (mesma
+          # família xvidcore/libcaca). Plus, upstream postInstall faz
+          # `rm $out/lib/libquirc.a` (pro caso .so), e o Makefile NÃO
+          # gera `quirc.pc` — sem .pc, ffmpeg `check_pkg_config quirc`
+          # falha. Fix: build `libquirc.a` direto, install handmade,
+          # gerar .pc minimalista. libjpeg/libpng em buildInputs upstream
+          # são pra qrtest CLI; consumer só usa o lib core — manter
+          # buildInputs intactos é seguro (consumer não link contra
+          # esses; só configure-time).
+          quircStatic = pkgs.pkgsStatic.quirc.overrideAttrs (oa: {
+            buildPhase = ''
+              runHook preBuild
+              # Makefile do quirc faz `$(shell pkg-config --cflags sdl)`
+              # no top — sem sdl.pc, captura STDERR como output e injeta
+              # em CFLAGS. Passar vazios neutraliza o probe.
+              make libquirc.a SDL_CFLAGS= SDL_LIBS=
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm644 libquirc.a $out/lib/libquirc.a
+              install -Dm644 lib/quirc.h $out/include/quirc.h
+              mkdir -p $out/lib/pkgconfig
+              cat > $out/lib/pkgconfig/quirc.pc <<EOF
+              prefix=$out
+              exec_prefix=$out
+              libdir=$out/lib
+              includedir=$out/include
+
+              Name: quirc
+              Description: QR code recognition library
+              Version: 1.2
+              Libs: -L\''${libdir} -lquirc
+              Libs.private: -lm
+              Cflags: -I\''${includedir}
+              EOF
+              runHook postInstall
+            '';
+            postInstall = "";
+            preInstall = "";
+          });
+          # libopenmpt em pkgsStatic puxa uma chain de audio backends que
+          # não fazem sentido em static (ffmpeg só consome o decoder core):
+          #
+          #  1. `mpg123` default vem com `withPulse=true` em Linux → puxa
+          #     `libpulseaudio` que tem badPlatforms.isStatic. Override
+          #     pra `libOnly = true` (só a lib, sem CLI player + sem
+          #     audio backends ALSA/Pulse/JACK).
+          #  2. `portaudio` é puxado mas só serve pro CLI `openmpt123`,
+          #     não pra libopenmpt.a. Em pkgsStatic puxa alsa-lib +
+          #     libjack2 que adicionam complexidade. Suprimir.
+          #  3. `libsndfile` mesmo caso — só CLI. Suprimir.
+          #  4. `usePulseAudio = false` é o flag direto do libopenmpt
+          #     pra desativar o link contra libpulseaudio (independente
+          #     do que mpg123 propaga).
+          mpg123Lib = pkgs.pkgsStatic.mpg123.override {
+            libOnly = true;
+            # assert: withConplay → !libOnly. CLI tool inútil sem o lib full.
+            withConplay = false;
+          };
+          libopenmptLean = (pkgs.pkgsStatic.libopenmpt.override {
+            usePulseAudio = false;
+            mpg123 = mpg123Lib;
+          }).overrideAttrs (oa: {
+            # ffmpeg consome só `libopenmpt.a` decoder core. Drop:
+            #  - portaudio/sndfile: backends de áudio pro CLI
+            #  - openmpt123 CLI: player command-line (puxa portaudio
+            #    transitively, e bin/openmpt123 ficaria órfão sem ele)
+            #  - examples/tests: economia de tempo
+            configureFlags = (oa.configureFlags or [ ]) ++ [
+              "--without-portaudio"
+              "--without-portaudiocpp"
+              "--without-sndfile"
+              "--disable-openmpt123"
+              "--disable-tests"
+              "--disable-examples"
+            ];
+            # Sem openmpt123 não há nada pra colocar em $bin
+            outputs = [ "out" "dev" ];
+            buildInputs = builtins.filter
+              (d:
+                let p = d.pname or null; in
+                p != "portaudio" && p != "libsndfile")
+              (oa.buildInputs or [ ]);
+            propagatedBuildInputs = builtins.filter
+              (d:
+                let p = d.pname or null; in
+                p != "portaudio" && p != "libsndfile" && p != "libpulseaudio")
+              (oa.propagatedBuildInputs or [ ]);
+          });
           libcacaTerm = (pkgs.pkgsStatic.libcaca.override { x11Support = false; }).overrideAttrs (oa: {
             outputs = [ "out" "dev" ];
             buildPhase = ''
@@ -500,7 +592,7 @@
                 "--enable-libopenjpeg"
                 "--enable-libxml2"
                 "--enable-libxvid"
-                "--enable-libmodplug"
+                "--enable-libopenmpt"
                 "--enable-libtwolame"
                 "--enable-libspeex"
                 "--enable-libssh"
@@ -524,6 +616,9 @@
                 "--enable-libxcb-shm"
                 "--enable-libxcb-xfixes"
                 "--enable-libxcb-shape"
+                "--enable-libquirc"
+                "--enable-libbs2b"
+                "--enable-libmysofa"
               ];
               # Multi-output deps need both outputs in buildInputs:
               # `out` (the .a) plus `.dev` (the .pc + headers). Without
@@ -541,7 +636,8 @@
                 libaom       libaom.dev
                 openjpeg     openjpeg.dev
                 libxml2      libxml2.dev
-                libmodplug   libmodplug.dev
+                libbs2b
+                libmysofa    libmysofa.dev
                 twolame
                 speex        speex.dev
                 fontconfig   fontconfig.dev
@@ -552,7 +648,7 @@
                 libcdio-paranoia
                 libdrm       libdrm.dev
                 xorg.libxcb  xorg.libxcb.dev
-              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic libcacaTerm libcacaTerm.dev ];
+              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic libcacaTerm libcacaTerm.dev libopenmptLean libopenmptLean.dev quircStatic ];
             } else { flags = [ ]; inputs = [ ]; };
         in
         mkFfmpeg pkgs.pkgsStatic {
