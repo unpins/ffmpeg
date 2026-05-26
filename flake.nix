@@ -369,6 +369,43 @@
           # pkgsStatic auto-promotes upstream buildInputs into it, see
           # [[pkgsstatic-propagated-buildinputs]] /
           # [[srt-pkgsstatic-mbedtls-swap]].
+          # nixpkgs `pkgsStatic.chromaprint` carrega `ffmpeg-headless`
+          # em buildInputs por causa do binário `fpcalc` (CLI tool que
+          # decodifica áudio via libav* antes de fingerprintar). A lib
+          # `libchromaprint.a` em si não toca em libavcodec — o decode
+          # é gerado pelo consumer. Em pkgsStatic isso vira circular
+          # (queremos ffmpeg → chromaprint, mas chromaprint → ffmpeg)
+          # E pior: o ffmpeg-headless de upstream puxa libpulseaudio em
+          # propagatedBuildInputs, que é `badPlatform` em musl.
+          # Disable `withTools` + `withExamples` + zera buildInputs +
+          # propagatedBuildInputs. zlib não é necessário pra core lib.
+          chromaprintLean = (pkgs.pkgsStatic.chromaprint.override {
+            withTools = false;
+            withExamples = false;
+          }).overrideAttrs (oa: {
+            buildInputs = [ ];
+            propagatedBuildInputs = [ ];
+            # libchromaprint.a é C++ (sources em src/*.cpp). Upstream's
+            # libchromaprint.pc omite Libs.private — em distros normais
+            # o consumer dynamic-lib pega libstdc++.so do sistema. Em
+            # pkgsStatic + ffmpeg `--pkg-config-flags=--static`, sem
+            # Libs.private o probe `chromaprint_get_version` link falha
+            # com `undefined reference to __cxa_*` e `cosf`. Appendar
+            # explicitamente.
+            postInstall = (oa.postInstall or "") + ''
+              echo 'Libs.private: -lstdc++ -lm' \
+                >> $out/lib/pkgconfig/libchromaprint.pc
+            '';
+          });
+          # nixpkgs `pkgsStatic.game-music-emu` postFixup faz
+          # `remove-references-to -t cc $(readlink -f $out/lib/libgme.so)`
+          # — em pkgsStatic não há .so; readlink retorna vazio e o
+          # `remove-references-to` fallback pra sed sem input gera
+          # "sed: no input files" → exit 1. Como não temos .so, drop
+          # postFixup inteiro (a .a já não referencia o gcc do build).
+          gmeStatic = pkgs.pkgsStatic.game-music-emu.overrideAttrs (oa: {
+            postFixup = "";
+          });
           rubberbandLean = pkgs.pkgsStatic.rubberband.overrideAttrs (oa: {
             nativeBuildInputs = builtins.filter
               (d: !(d.pname or null == "openjdk-headless"))
@@ -434,6 +471,9 @@
                 "--enable-librsvg"
                 "--enable-libvidstab"
                 "--enable-librubberband"
+                "--enable-chromaprint"
+                "--enable-libzvbi"
+                "--enable-libgme"
               ];
               # Multi-output deps need both outputs in buildInputs:
               # `out` (the .a) plus `.dev` (the .pc + headers). Without
@@ -457,7 +497,8 @@
                 fontconfig   fontconfig.dev
                 opencore-amr
                 vid-stab
-              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean ];
+                zvbi         zvbi.dev
+              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic ];
             } else { flags = [ ]; inputs = [ ]; };
         in
         mkFfmpeg pkgs.pkgsStatic {
