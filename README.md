@@ -46,7 +46,7 @@ On **Linux** the binary additionally includes:
 - **Audio encoders:** libtwolame (MP2), libspeex, libopencore-amrnb
 - **Audio decoders:** libopencore-amrwb, libmodplug
 - **Audio processing:** libsoxr resampler
-- **Image:** libwebp, libopenjpeg (JPEG 2000)
+- **Image:** libwebp, libopenjpeg (JPEG 2000), librsvg (SVG → raster)
 - **Subtitles:** libass + freetype + harfbuzz + fribidi + fontconfig
 - **Manifests:** libxml2 (DASH / HLS)
 - **Streaming protocols:** SRT (libsrt), SFTP (libssh), RTMP/RTMPS (librtmp + ffmpeg-internal mbedtls), RIST (librist)

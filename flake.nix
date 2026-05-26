@@ -335,6 +335,24 @@
           qrencodeNoCheck = pkgs.pkgsStatic.qrencode.overrideAttrs (oa: {
             doCheck = false;
           });
+          # nixpkgs `pkgsStatic.librsvg`: meson runs
+          # `rustc --target=x86_64-unknown-linux-musl --print=native-static-libs`
+          # which prints `-lunwind -lc`, then calls
+          # `cc.find_library('unwind', static: true)` for each — see
+          # librsvg meson.build:375. nixpkgs doesn't ship libunwind in
+          # the librsvg buildInputs because the dynamic-lib build resolves
+          # `_Unwind_*` via libgcc_s at runtime. In pkgsStatic the probe
+          # is hard-required. Alpine builds librsvg as `.so` only and
+          # doesn't pass `-Ddefault_library=static`, so the probe never
+          # fires — that's why their APKBUILD looks clean.
+          #
+          # Fix: feed the GCC libunwind (1.8.x, ~250 KB) as a buildInput.
+          # llvmPackages.libunwind also works but is 4× the size; both
+          # export the same `_Unwind_*` ABI so the static link succeeds
+          # either way.
+          librsvgStatic = pkgs.pkgsStatic.librsvg.overrideAttrs (oa: {
+            buildInputs = (oa.buildInputs or [ ]) ++ [ pkgs.pkgsStatic.libunwind ];
+          });
           x265Static = pkgs.pkgsStatic.x265.overrideAttrs (oa: {
             postBuild = (oa.postBuild or "") + ''
               echo "merging libx265.a + libx265-10.a + libx265-12.a → unified libx265.a"
@@ -380,6 +398,7 @@
                 "--enable-libfontconfig"
                 "--enable-libopencore-amrnb"
                 "--enable-libopencore-amrwb"
+                "--enable-librsvg"
               ];
               # Multi-output deps need both outputs in buildInputs:
               # `out` (the .a) plus `.dev` (the .pc + headers). Without
@@ -402,7 +421,7 @@
                 speex        speex.dev
                 fontconfig   fontconfig.dev
                 opencore-amr
-              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev ];
+              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind ];
             } else { flags = [ ]; inputs = [ ]; };
         in
         mkFfmpeg pkgs.pkgsStatic {
