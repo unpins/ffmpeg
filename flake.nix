@@ -190,7 +190,36 @@
             makeFlags = (oa.makeFlags or [ ]) ++ [ "SHARED=no" "CRYPTO=" ];
             propagatedBuildInputs = [ pkgs.pkgsStatic.zlib ];
           });
-          libbluraySafe = pkgs.pkgsStatic.libbluray.overrideAttrs (oa: {
+          # libbluray's buildInputs unconditionally include fontconfig
+          # (no `--without-fontconfig` knob in upstream configure).
+          # On darwin pkgsStatic the fontconfig closure pulls
+          # dejavu-fonts → fontforge → python3 → cross-bash, which
+          # fails to evaluate on aarch64-darwin cross-from-darwin
+          # (bash 5.3p3 binary path is missing from the cross closure).
+          # libbluray uses fontconfig only at runtime (for menu/OSD
+          # font discovery) — it's not a link-time requirement of the
+          # `bd_*` C API ffmpeg exercises. Drop the dep from
+          # buildInputs and propagatedBuildInputs on darwin; ffmpeg's
+          # libbluray probe still passes (only headers + bd_open
+          # link probe). Menu rendering would degrade if a consumer
+          # invokes the BD-J UI path, which ffmpeg's libbluray demuxer
+          # does not.
+          libbluraySafe = (pkgs.pkgsStatic.libbluray.override (
+            if isDarwin
+            then { fontconfig = pkgs.pkgsStatic.emptyDirectory; }
+            else { }
+          )).overrideAttrs (oa: {
+            # libbluray's autoconf has `--without-fontconfig` (Linux
+            # uses it for menu fonts; ffmpeg's libbluray demuxer
+            # doesn't touch that path). Add the flag on darwin and
+            # filter fontconfig out of buildInputs so the eval/build
+            # doesn't traverse the dejavu→fontforge→cross-bash chain.
+            configureFlags = (oa.configureFlags or [ ])
+              ++ pkgs.lib.optional isDarwin "--without-fontconfig";
+            buildInputs = pkgs.lib.optionals (!isDarwin) (oa.buildInputs or [ ])
+              ++ pkgs.lib.optionals isDarwin (builtins.filter
+                (d: !(d.pname or null == "fontconfig"))
+                (oa.buildInputs or [ ]));
             # libbluray.a leaks internal helpers as globals — `dec_init`
             # in particular collides with ffmpeg's own `dec_init` in
             # fftools/ffmpeg_dec.c at static link time. `--localize-
@@ -201,8 +230,14 @@
             # so libbluray stays self-consistent while the renamed
             # symbol no longer matches ffmpeg's `dec_init`.
             postInstall = (oa.postInstall or "") + ''
+              # Mach-O symbols carry a leading underscore by convention
+              # (clang C ABI), ELF does not. `$OBJCOPY --redefine-sym`
+              # is the literal bytes that get rewritten in the symbol
+              # table, so we must spell the underscore form on darwin.
               echo "renaming dec_init -> bluray_internal_dec_init in libbluray.a"
-              $OBJCOPY --redefine-sym=dec_init=bluray_internal_dec_init \
+              $OBJCOPY ${if isDarwin
+                then "--redefine-sym=_dec_init=_bluray_internal_dec_init"
+                else "--redefine-sym=dec_init=bluray_internal_dec_init"} \
                 $out/lib/libbluray.a
             '';
           });
@@ -393,7 +428,16 @@
             # com `undefined reference to __cxa_*` e `cosf`. Appendar
             # explicitamente.
             postInstall = (oa.postInstall or "") + ''
-              echo 'Libs.private: -lstdc++ -lm' \
+              # chromaprint's CMake auto-selects FFT_LIB=vdsp on darwin
+              # → libchromaprint.a references vDSP_* symbols from
+              # Apple's Accelerate framework. Append -framework
+              # Accelerate so consumer link probes (ffmpeg's
+              # --pkg-config-flags=--static) resolve those symbols.
+              # Also: clang on darwin uses libc++ (not libstdc++) for
+              # the C++ runtime.
+              echo 'Libs.private: ${if isDarwin
+                then "-lc++ -lm -framework Accelerate"
+                else "-lstdc++ -lm"}' \
                 >> $out/lib/pkgconfig/libchromaprint.pc
             '';
           });
@@ -541,12 +585,19 @@
                 >> $dev/lib/pkgconfig/caca.pc
             '';
           });
-          rubberbandLean = pkgs.pkgsStatic.rubberband.overrideAttrs (oa: {
+          rubberbandLean = (pkgs.pkgsStatic.rubberband.override {
+            # callPackage-level fftw swap so the original rubberband
+            # derivation's `buildInputs = [...fftw...]` resolves to our
+            # openmp-free fftw on darwin (avoiding the python3-broken
+            # chain). overrideAttrs would be too late — the .eval of
+            # `pkgs.pkgsStatic.rubberband` already triggers fftw eval.
+            fftw = fftwPkg;
+          }).overrideAttrs (oa: {
             nativeBuildInputs = builtins.filter
               (d: !(d.pname or null == "openjdk-headless"))
               (oa.nativeBuildInputs or [ ]);
-            buildInputs = with pkgs.pkgsStatic; [ fftw libsamplerate ];
-            propagatedBuildInputs = with pkgs.pkgsStatic; [ fftw libsamplerate ];
+            buildInputs = [ fftwPkg pkgs.pkgsStatic.libsamplerate ];
+            propagatedBuildInputs = [ fftwPkg pkgs.pkgsStatic.libsamplerate ];
             mesonFlags = (oa.mesonFlags or [ ]) ++ [
               "-Dvamp=disabled"
               "-Dladspa=disabled"
@@ -558,6 +609,125 @@
               "-Dresampler=libsamplerate"
             ];
           });
+          # nixpkgs `libvpx` package.nix references the legacy
+          # `stdenv.hostPlatform.osxMinVersion`, which was renamed to
+          # `darwinMinVersion` in the current nixpkgs systems lib (see
+          # lib/systems/default.nix:364). The package wasn't updated so
+          # eval crashes on darwin with "attribute 'osxMinVersion'
+          # missing". Bridge the rename by injecting `osxMinVersion` into
+          # the hostPlatform attrset before package.nix reads it. The
+          # value drives a `darwin${N}` kernel tag in libvpx's `target`
+          # (configure --target=...); darwinMinVersion is "14.0" in this
+          # pin, so libvpx will tag itself as darwin14 — correct for any
+          # macOS 10.10+ deployment target.
+          # speex (codec) propagates speexdsp (echo cancel / signal
+          # helpers); speexdsp defaults to `withFftw3 = true` which pulls
+          # fftw. On pkgsStatic-darwin fftw drags in LLVM `openmp` which
+          # has `python3` in propagated chain — and python3 is `broken`
+          # in pkgsStatic-darwin. ffmpeg's `--enable-libspeex` only uses
+          # the speex *codec* (encoder/decoder), not speexdsp's FFT —
+          # so dropping FFT support saves the whole openmp/python chain.
+          # Same toggle for speex itself (`withFft` controls whether the
+          # echo-cancel demo code links against fftw — also unused by
+          # ffmpeg's libspeex probe).
+          # vid.stab on darwin clang propagates LLVM `openmp` for
+          # parallel stabilization; openmp's static build has `python3`
+          # in propagated chain — and python3 is `broken` in
+          # pkgsStatic-darwin. Drop openmp propagation; CMake's
+          # `find_package(OpenMP)` returns false at vid.stab configure,
+          # the library falls back to sequential transforms. We don't
+          # pay throughput attention here (single-clip stabilization is
+          # latency-bound, not throughput-bound).
+          vidStabPkg =
+            if isDarwin
+            then pkgs.pkgsStatic.vid-stab.overrideAttrs (_oa: {
+              propagatedBuildInputs = [ ];
+              buildInputs = [ ];
+            })
+            else pkgs.pkgsStatic.vid-stab;
+          # fftw in nixpkgs hard-codes `--enable-openmp` and pulls
+          # `llvmPackages.openmp` as a buildInput on clang stdenvs.
+          # On pkgsStatic-darwin that chain hits `python3` (broken).
+          # Drop the openmp inputs + the configure flag; fftw still
+          # builds with `--enable-threads` (pthread parallelism), which
+          # is what rubberband actually consumes — librubberband.so
+          # doesn't dlopen OpenMP runtime, it just uses fftw_plan_*
+          # serial/threaded. Saves the openmp/python chain entirely.
+          fftwPkg =
+            if isDarwin
+            then (pkgs.pkgsStatic.fftw.override {
+              # callPackage swap: replace `llvmPackages.openmp` with an
+              # empty placeholder so the initial fftw eval doesn't
+              # traverse openmp's propagated python3 (broken on
+              # pkgsStatic-darwin). overrideAttrs below drops the
+              # placeholder from buildInputs and the `--enable-openmp`
+              # configure flag, leaving fftw configured for pthread-only
+              # parallelism (which is what rubberband consumes anyway).
+              llvmPackages = { openmp = pkgs.pkgsStatic.emptyDirectory; };
+            }).overrideAttrs (oa: {
+              buildInputs = [ ];
+              # gfortran is in fftw's nativeBuildInputs but unused at
+              # configure time (no --enable-fortran flag). On
+              # cross-darwin from linux, building an x86_64-apple-
+              # darwin-gfortran wrapper pulls a full GCC cross with
+              # `objc,obj-c++` languages enabled — and that cross-gcc
+              # build itself fails (missing isl 0.15+, missing darwin
+              # objc bridge). Drop gfortran outright since fftw doesn't
+              # actually need it for the C-only build path.
+              nativeBuildInputs = builtins.filter
+                (d: !(d.pname or null == "gfortran-wrapper"))
+                (oa.nativeBuildInputs or [ ]);
+              configureFlags =
+                builtins.filter (f: f != "--enable-openmp") oa.configureFlags;
+            })
+            else pkgs.pkgsStatic.fftw;
+          speexdspPkg =
+            if isDarwin
+            then pkgs.pkgsStatic.speexdsp.override { withFftw3 = false; }
+            else pkgs.pkgsStatic.speexdsp;
+          speexPkg =
+            if isDarwin
+            then pkgs.pkgsStatic.speex.override {
+              withFft = false;
+              speexdsp = speexdspPkg;
+            }
+            else pkgs.pkgsStatic.speex;
+          libvpxDarwinFix = (pkgs.pkgsStatic.libvpx.override {
+            stdenv = pkgs.pkgsStatic.stdenv // {
+              hostPlatform = pkgs.pkgsStatic.stdenv.hostPlatform // {
+                # nixpkgs libvpx's package.nix reads `osxMinVersion`,
+                # which was renamed to `darwinMinVersion` in modern
+                # nixpkgs systems lib — eval crashes without a
+                # placeholder. The value used here is purely a stand-in
+                # to make eval succeed; we override the bad
+                # `--target=…-darwin14-gcc` flag below.
+                osxMinVersion = "10.10";
+              };
+            };
+          }).overrideAttrs (oa: {
+            # The libvpx package.nix maps to a maximum of `darwin14`
+            # (macOS 10.10), which in libvpx's own configure injects
+            # `-mmacosx-version-min=10.10` into CFLAGS+LDFLAGS. The
+            # macOS 14.4 SDK headers then reject calls like
+            # `CLOCK_MONOTONIC_RAW` (available only from 10.12+).
+            # libvpx supports up to `darwin25` (macOS 15+) — rewrite
+            # the configure flag to target darwin23 (macOS 14, matching
+            # nixpkgs's `darwinMinVersion = "14.0"`) so the SDK
+            # availability check passes.
+            configureFlags =
+              (builtins.filter
+                (f: !(pkgs.lib.hasPrefix "--target=x86_64-darwin" f
+                  || pkgs.lib.hasPrefix "--target=arm64-darwin" f
+                  || pkgs.lib.hasPrefix "--target=aarch64-darwin" f))
+                oa.configureFlags)
+              ++ [
+                "--target=${
+                  if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x86_64"
+                }-darwin23-gcc"
+              ];
+          });
+          libvpxPkg =
+            if isDarwin then libvpxDarwinFix else pkgs.pkgsStatic.libvpx;
           x265Static = pkgs.pkgsStatic.x265.overrideAttrs (oa: {
             postBuild = (oa.postBuild or "") + ''
               echo "merging libx265.a + libx265-10.a + libx265-12.a → unified libx265.a"
@@ -573,42 +743,85 @@
             '';
             postInstall = "";
           });
-          linuxExtras =
+          # Shared extras run on both Linux and Darwin (pkgsStatic). All
+          # deps below are portable codec/protocol/filter libraries — no
+          # kernel-specific stuff (KMS/X11/CDDA/etc). Linux-only items
+          # live in `linuxOnlyExtras` below.
+          sharedExtras = {
+            flags = [
+              "--enable-mbedtls"
+              "--enable-libsvtav1"
+              "--enable-libx265"
+              "--enable-libwebp"
+              "--enable-libvpx"
+              "--enable-libsoxr"
+              "--enable-libtheora"
+              "--enable-libsrt"
+              "--enable-libaom"
+              "--enable-libopenjpeg"
+              "--enable-libxml2"
+              "--enable-libxvid"
+              "--enable-libopenmpt"
+              "--enable-libtwolame"
+              "--enable-libspeex"
+              "--enable-libssh"
+              "--enable-libbluray"
+              "--enable-librtmp"
+              "--enable-librist"
+              "--enable-libqrencode"
+              "--enable-libopencore-amrnb"
+              "--enable-libopencore-amrwb"
+              "--enable-libvidstab"
+              "--enable-librubberband"
+              "--enable-chromaprint"
+              "--enable-libzvbi"
+              "--enable-libgme"
+              "--enable-libquirc"
+              "--enable-libbs2b"
+              "--enable-libmysofa"
+            ];
+            # Multi-output deps need both outputs in buildInputs:
+            # `out` (the .a) plus `.dev` (the .pc + headers). Without
+            # `.dev`, ffmpeg's pkg-config probe fails silently. libwebp
+            # is single-output so the bare entry is enough.
+            inputs = with pkgs.pkgsStatic; [
+              mbedtls
+              libwebp
+            ] ++ [ libvpxPkg libvpxPkg.dev ] ++ (with pkgs.pkgsStatic; [
+              libtheora    libtheora.dev
+              libaom       libaom.dev
+              openjpeg     openjpeg.dev
+              libxml2      libxml2.dev
+              libbs2b
+              libmysofa    libmysofa.dev
+              twolame
+              opencore-amr
+              zvbi         zvbi.dev
+            ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ];
+          };
+          # Linux-only extras: kernel/Linux-specific or
+          # cross-build-blocked-on-darwin features.
+          #   - libdrm/kmsgrab: KMS is a Linux kernel ABI
+          #   - libxcb/x11grab: X11 socket — macOS isn't headless X
+          #   - libcdio/libcdio-paranoia: Linux CDDA ioctls
+          #   - libcaca: terminal output device, niche; pulls ncurses
+          #   - librsvg: heavy Rust+GTK chain, validate cross-target later
+          #   - libass + freetype + harfbuzz + fribidi + fontconfig:
+          #     harfbuzz pulls glib unconditionally; glib's meson.build
+          #     requires `objc` compiler in the cross [binaries] section
+          #     when host_system == 'darwin', and our linux→darwin
+          #     cross-file doesn't supply objc. Defer until a proper
+          #     objc cross-wrapper exists (or harfbuzz gains a
+          #     `withGlib=false` knob).
+          linuxOnlyExtras =
             if isLinux then {
               flags = [
-                "--enable-mbedtls"
-                "--enable-libsvtav1"
-                "--enable-libx265"
                 "--enable-libass"
                 "--enable-libfreetype"
                 "--enable-libharfbuzz"
                 "--enable-libfribidi"
-                "--enable-libwebp"
-                "--enable-libvpx"
-                "--enable-libsoxr"
-                "--enable-libtheora"
-                "--enable-libsrt"
-                "--enable-libaom"
-                "--enable-libopenjpeg"
-                "--enable-libxml2"
-                "--enable-libxvid"
-                "--enable-libopenmpt"
-                "--enable-libtwolame"
-                "--enable-libspeex"
-                "--enable-libssh"
-                "--enable-libbluray"
-                "--enable-librtmp"
-                "--enable-librist"
-                "--enable-libqrencode"
                 "--enable-libfontconfig"
-                "--enable-libopencore-amrnb"
-                "--enable-libopencore-amrwb"
                 "--enable-librsvg"
-                "--enable-libvidstab"
-                "--enable-librubberband"
-                "--enable-chromaprint"
-                "--enable-libzvbi"
-                "--enable-libgme"
                 "--enable-libcaca"
                 "--enable-libcdio"
                 "--enable-libdrm"
@@ -616,46 +829,29 @@
                 "--enable-libxcb-shm"
                 "--enable-libxcb-xfixes"
                 "--enable-libxcb-shape"
-                "--enable-libquirc"
-                "--enable-libbs2b"
-                "--enable-libmysofa"
               ];
-              # Multi-output deps need both outputs in buildInputs:
-              # `out` (the .a) plus `.dev` (the .pc + headers). Without
-              # `.dev`, ffmpeg's pkg-config probe fails silently. libwebp
-              # is single-output so the bare entry is enough.
               inputs = with pkgs.pkgsStatic; [
-                mbedtls
                 libass    libass.dev
                 freetype  freetype.dev
                 harfbuzz  harfbuzz.dev
                 fribidi   fribidi.dev
-                libwebp
-                libvpx       libvpx.dev
-                libtheora    libtheora.dev
-                libaom       libaom.dev
-                openjpeg     openjpeg.dev
-                libxml2      libxml2.dev
-                libbs2b
-                libmysofa    libmysofa.dev
-                twolame
-                speex        speex.dev
-                fontconfig   fontconfig.dev
-                opencore-amr
-                vid-stab
-                zvbi         zvbi.dev
+                fontconfig fontconfig.dev
                 libcdio      libcdio.dev
                 libcdio-paranoia
                 libdrm       libdrm.dev
                 xorg.libxcb  xorg.libxcb.dev
-              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic libcacaTerm libcacaTerm.dev libopenmptLean libopenmptLean.dev quircStatic ];
+              ] ++ [ librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind libcacaTerm libcacaTerm.dev ];
             } else { flags = [ ]; inputs = [ ]; };
+          extras = {
+            flags = sharedExtras.flags ++ linuxOnlyExtras.flags;
+            inputs = sharedExtras.inputs ++ linuxOnlyExtras.inputs;
+          };
         in
         mkFfmpeg pkgs.pkgsStatic {
           extraConfigureFlags =
             (if isDarwin then [ ] else [ "--enable-pthreads" ])
-            ++ linuxExtras.flags;
-          extraInputs = linuxExtras.inputs;
+            ++ extras.flags;
+          extraInputs = extras.inputs;
         };
 
       # mingw: force pthreads (not w32threads) to match downstream codec
