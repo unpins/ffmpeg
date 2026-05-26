@@ -52,9 +52,10 @@ On **Linux** the binary additionally includes:
 - **Streaming protocols:** SRT (libsrt), SFTP (libssh), RTMP/RTMPS (librtmp + ffmpeg-internal mbedtls), RIST (librist)
 - **Discs:** libbluray
 - **Filters:** libqrencode (QR code overlay / source), libvidstab (video stabilization), librubberband (audio time-stretch / pitch-shift)
-- **Demuxers:** libgme (NES / SNES / Genesis / GameBoy / MSX chiptune)
+- **Demuxers:** libgme (NES / SNES / Genesis / GameBoy / MSX chiptune), libcdio (audio CD / CDDA grabbing via libcdio-paranoia)
 - **Captions:** libzvbi (DVB teletext + VBI closed captions)
 - **Fingerprint:** chromaprint muxer (AcoustID-compatible audio fingerprint)
+- **Output devices:** libcaca (color ASCII-art terminal output)
 
 The smaller macOS / Windows feature set keeps the package working on the cross-platform pkgsStatic toolchain that powers this build. Extending the extras across all targets is tracked separately.
 

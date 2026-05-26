@@ -406,6 +406,49 @@
           gmeStatic = pkgs.pkgsStatic.game-music-emu.overrideAttrs (oa: {
             postFixup = "";
           });
+          # nixpkgs `pkgsStatic.libcaca` puxa `imlib2 (x11Support=true)` +
+          # libX11 + libXext porque o default da recipe é `x11Support ?
+          # !stdenv.isDarwin`. Em pkgsStatic isso quebra (imlib2 com X11
+          # cai em libX11 → fontconfig → expat chain inviável). ffmpeg só
+          # usa o `caca_outdev` que renderiza no terminal via ncurses ou
+          # slang — X11 não é caminho. `.override { x11Support = false; }`
+          # desativa o flag de configure (`--disable-x11`) e cai pro
+          # imlib2 sem X (que builda fino).
+          #
+          # Segundo trap: libcaca autotools recurse sempre em SUBDIRS=
+          # `kernel caca src examples tools cxx`. O `examples/conio.c:76`
+          # define uma `move()` local que colide com ncurses `move()` em
+          # link estático (`multiple definition of move`). Não há flag
+          # autoconf pra disable-examples — a saída é limitar build +
+          # install ao subdir `caca/` (que tem o .a + caca.pc + headers,
+          # tudo que ffmpeg precisa). Outputs vão pra ["out" "dev"] (sem
+          # `bin` porque não buildamos `tools/caca-config`).
+          libcacaTerm = (pkgs.pkgsStatic.libcaca.override { x11Support = false; }).overrideAttrs (oa: {
+            outputs = [ "out" "dev" ];
+            buildPhase = ''
+              runHook preBuild
+              make -C caca
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              make -C caca install
+              runHook postInstall
+            '';
+            postInstall = "";
+            # libcaca's caca.pc declares `Libs.private: -lz` mas omite o
+            # ncurses driver (`-lncursesw`), apesar do .a usar `curs_set`,
+            # `initscr`, etc. Em distros normais (dynamic-link) o consumer
+            # carrega ncurses.so transitivamente; em pkgsStatic + ffmpeg
+            # `--pkg-config-flags=--static` o link falha com `undefined
+            # reference to curs_set`. Appendar `Requires.private: ncursesw`
+            # → pkg-config resolve ncursesw.pc e injeta `-lncursesw` no
+            # tail do link line.
+            postFixup = (oa.postFixup or "") + ''
+              echo 'Requires.private: ncursesw' \
+                >> $dev/lib/pkgconfig/caca.pc
+            '';
+          });
           rubberbandLean = pkgs.pkgsStatic.rubberband.overrideAttrs (oa: {
             nativeBuildInputs = builtins.filter
               (d: !(d.pname or null == "openjdk-headless"))
@@ -474,6 +517,8 @@
                 "--enable-chromaprint"
                 "--enable-libzvbi"
                 "--enable-libgme"
+                "--enable-libcaca"
+                "--enable-libcdio"
               ];
               # Multi-output deps need both outputs in buildInputs:
               # `out` (the .a) plus `.dev` (the .pc + headers). Without
@@ -498,7 +543,9 @@
                 opencore-amr
                 vid-stab
                 zvbi         zvbi.dev
-              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic ];
+                libcdio      libcdio.dev
+                libcdio-paranoia
+              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic libcacaTerm libcacaTerm.dev ];
             } else { flags = [ ]; inputs = [ ]; };
         in
         mkFfmpeg pkgs.pkgsStatic {
