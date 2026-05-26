@@ -129,10 +129,288 @@
 
       # darwin's libSystem doesn't ship libpthread.a so --enable-pthreads
       # breaks the configure probe; linux is fine.
-      build = pkgs: mkFfmpeg pkgs.pkgsStatic {
-        extraConfigureFlags =
-          if pkgs.stdenv.isDarwin then [ ] else [ "--enable-pthreads" ];
-      };
+      build = pkgs:
+        let
+          isDarwin = pkgs.stdenv.isDarwin;
+          isLinux = pkgs.stdenv.hostPlatform.isLinux;
+          # nixpkgs's svt-av1 defaults to `-DSVT_AV1_LTO=ON` which makes the
+          # static archive ship only LTO IR (`__gnu_lto_slim` is the only
+          # symbol the regular .symtab carries). ffmpeg's pkg-config link
+          # probe calls ld.bfd without `-flto`/the LTO plugin, so the probe
+          # fails with `undefined reference to svt_av1_enc_init_handle`.
+          # Append `-DSVT_AV1_LTO=OFF` (cmake takes last-wins for `-D…`).
+          svtAv1NoLto = (pkgs.pkgsStatic.svt-av1.overrideAttrs (oa: {
+            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [ "-DSVT_AV1_LTO=OFF" ];
+          }));
+          # nixpkgs x265 in pkgsStatic needs two surgical patches:
+          #
+          #  1. Multi-bit-depth archives stay separate. With the default
+          #     `multibitdepthSupport = true`, the x265 build produces
+          #     three archives — main (8-bit), `libx265-10.a`,
+          #     `libx265-12.a` — and the main archive references
+          #     `x265_10bit::` / `x265_12bit::` symbols from the siblings.
+          #     The dynamic-lib build merges them into a single `.so`;
+          #     pkgsStatic suppresses the `.so` and leaves the static
+          #     archives unmerged, so any consumer linking `-lx265` sees
+          #     undefined references. We merge the three with `ar -M`
+          #     into a self-contained `libx265.a` (postBuild). Cutting
+          #     `multibitdepthSupport` instead would drop Main10 (HDR10)
+          #     and Main12 — too much loss for a static-lib rebundle.
+          #
+          #  2. `rm -f $out/lib/*.a` in upstream postInstall — correct for
+          #     the dynamic default, fatal for pkgsStatic. Replace with
+          #     an empty postInstall.
+          # libbluray.a exposes plenty of internal symbols as globals
+          # (decode_*, udfread_*, dec_*) instead of `static`. `dec_init`
+          # in particular collides with ffmpeg's own `dec_init` in
+          # fftools/ffmpeg_dec.c at static link time. Localize it via
+          # `objcopy --localize-symbol`: keeps the public bd_* API
+          # globally visible but makes the colliding name file-local.
+          # Targeted (one symbol) rather than wholesale whitelist —
+          # extend the list if other collisions surface.
+          # nixpkgs `pkgsStatic.rtmpdump`: two issues stacked.
+          #
+          #  1. Makefile's `SHARED=yes` default builds librtmp.so.1
+          #     unconditionally; pkgsStatic toolchain can't link `.so`
+          #     (crtbeginT.o R_X86_64_32 against __TMC_END__). Override
+          #     `SHARED=no` so the top-level `all` target reduces to
+          #     just `librtmp.a`.
+          #
+          #  2. Default `CRYPTO=OPENSSL` drags OpenSSL back into the
+          #     closure (we worked to remove it via mbedtls swap on srt
+          #     and libssh). Override to `CRYPTO=` (empty) which maps
+          #     to `DEF_=-DNO_CRYPTO` in the Makefile — drops RTMPS via
+          #     librtmp. ffmpeg's own protocol handlers cover `rtmps://`
+          #     through `--enable-mbedtls`, so the user-visible feature
+          #     is preserved; we just don't route RTMPS through
+          #     librtmp anymore. POLARSSL is the only no-OpenSSL knob
+          #     librtmp ships, but its API is mbedtls 1.x/2.x — won't
+          #     compile against modern 3.x without API shims.
+          rtmpdumpStatic = pkgs.pkgsStatic.rtmpdump.overrideAttrs (oa: {
+            makeFlags = (oa.makeFlags or [ ]) ++ [ "SHARED=no" "CRYPTO=" ];
+            propagatedBuildInputs = [ pkgs.pkgsStatic.zlib ];
+          });
+          libbluraySafe = pkgs.pkgsStatic.libbluray.overrideAttrs (oa: {
+            # libbluray.a leaks internal helpers as globals — `dec_init`
+            # in particular collides with ffmpeg's own `dec_init` in
+            # fftools/ffmpeg_dec.c at static link time. `--localize-
+            # symbol` makes it file-local to dec.o, but then sibling
+            # object disc.o (calling dec_init) loses access. Use
+            # `--redefine-sym` instead: rewrites both the definition
+            # *and* internal references inside every .o of the archive,
+            # so libbluray stays self-consistent while the renamed
+            # symbol no longer matches ffmpeg's `dec_init`.
+            postInstall = (oa.postInstall or "") + ''
+              echo "renaming dec_init -> bluray_internal_dec_init in libbluray.a"
+              $OBJCOPY --redefine-sym=dec_init=bluray_internal_dec_init \
+                $out/lib/libbluray.a
+            '';
+          });
+          # nixpkgs `pkgsStatic.libssh` defaults to OpenSSL via
+          # `find_package(OpenSSL)`. Like srt, swap to mbedtls so we keep
+          # one crypto backend in the closure. libssh's CMake supports
+          # `-DWITH_MBEDTLS=ON` (ships its own `FindMbedTLS.cmake`).
+          # buildInputs reordered (no openssl); propagatedBuildInputs
+          # MUST be replaced (pkgsStatic auto-promotes buildInputs into
+          # it — see [[pkgsstatic-propagated-buildinputs]] /
+          # [[srt-pkgsstatic-mbedtls-swap]]).
+          libsshMbed = pkgs.pkgsStatic.libssh.overrideAttrs (oa: {
+            buildInputs = [
+              pkgs.pkgsStatic.zlib
+              pkgs.pkgsStatic.mbedtls
+              pkgs.pkgsStatic.libsodium
+            ];
+            propagatedBuildInputs = [
+              pkgs.pkgsStatic.zlib
+              pkgs.pkgsStatic.mbedtls
+              pkgs.pkgsStatic.libsodium
+            ];
+            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [ "-DWITH_MBEDTLS=ON" ];
+            # libssh's libssh.pc.cmake leaves Requires.private empty for
+            # the crypto backend (CMakeLists only appends gssapi to
+            # `LIBSSH_PC_REQUIRES_PRIVATE`). Without it, consumers
+            # using `pkg-config --static` get no transitive crypto link
+            # flags — ffmpeg's probe fails with `mbedtls_*` undefined.
+            # Inject Requires.private so pkg-config resolves mbedtls.pc
+            # / libsodium.pc / zlib.pc and emits the missing -L/-l.
+            # postFixup (not postInstall) — multipleOutputsPhase moves
+            # the .pc to $dev after install runs, so sed needs to wait.
+            postFixup = (oa.postFixup or "") + ''
+              # Append (CMake drops the Requires.private line entirely
+              # when LIBSSH_PC_REQUIRES_PRIVATE is empty), don't try to
+              # replace.
+              echo 'Requires.private: mbedtls libsodium zlib' \
+                >> $dev/lib/pkgconfig/libssh.pc
+            '';
+          });
+          # nixpkgs xvidcore: Makefile always builds both libxvidcore.a
+          # AND libxvidcore.so.4.3. pkgsStatic toolchain fails the .so
+          # link with `R_X86_64_32 against hidden symbol __TMC_END__` —
+          # static-PIE startup (crtbeginT.o) can't go into a shared
+          # object. Build only the static target. Also drop the
+          # upstream `rm $out/lib/*.a` postInstall trap (same shape as
+          # x265 — see [[x265-pkgsstatic-recipe]]).
+          xvidStatic = pkgs.pkgsStatic.xvidcore.overrideAttrs (oa: {
+            # Build only the static target; xvid's Makefile's default
+            # 'all' goal also makes the .so which the pkgsStatic
+            # toolchain can't link.
+            makeFlags = (oa.makeFlags or [ ]) ++ [ "libxvidcore.a" ];
+            # Skip 'make install' (it wants the .so we didn't build).
+            # Install the .a + header by hand instead. The .a lands in
+            # `=build/` (a literal directory name xvid uses) inside the
+            # configure cwd build/generic/.
+            installPhase = ''
+              runHook preInstall
+              install -Dm644 =build/libxvidcore.a $out/lib/libxvidcore.a
+              install -Dm644 ../../src/xvid.h $out/include/xvid.h
+              runHook postInstall
+            '';
+            postInstall = "";
+          });
+          # nixpkgs `pkgsStatic.srt` defaults to openssl crypto. We already
+          # carry mbedtls in this flake for `--enable-mbedtls`, so swap srt
+          # to the same backend: drops openssl from the closure entirely
+          # (no double-crypto). srt's CMake supports
+          # `-DUSE_ENCLIB=mbedtls` and ships `scripts/FindMbedTLS.cmake`,
+          # which discovers our static mbedtls via CMAKE_PREFIX_PATH.
+          srtMbed = pkgs.pkgsStatic.srt.overrideAttrs (oa: {
+            buildInputs = [ pkgs.pkgsStatic.mbedtls ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isMinGW [
+                pkgs.pkgsStatic.windows.pthreads
+              ];
+            # srt's CMake bakes absolute /nix/store/.../libmbedtls.a paths
+            # into `Libs.private` of `srt.pc`. ffmpeg's `--pkg-config-
+            # flags=--static` probe puts those absolute paths *before*
+            # the test object on the link command, and `-Wl,--as-needed`
+            # drops them (no unresolved refs yet); then `-lsrt` (after
+            # test.o) introduces mbedtls refs that nothing remains to
+            # resolve. Rewrite to `-l` form and propagate mbedtls so the
+            # cc-wrapper appends `-L${mbedtls}/lib -lmbedtls…` at the
+            # tail of the link line, after `-lsrt`.
+            # pkgsStatic auto-promotes buildInputs → propagatedBuildInputs
+            # at scope creation, so the original openssl from upstream's
+            # buildInputs is already sitting in `oa.propagatedBuildInputs`.
+            # We must *replace*, not extend, or openssl stays in the closure.
+            propagatedBuildInputs = [ pkgs.pkgsStatic.mbedtls ];
+            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [
+              "-DUSE_ENCLIB=mbedtls"
+              "-DENABLE_APPS=OFF"
+            ];
+            postInstall = (oa.postInstall or "") + ''
+              sed -i -E 's|[^ ]*/lib(mbed[a-z0-9]+)\.a|-l\1|g' \
+                $out/lib/pkgconfig/srt.pc
+            '';
+          });
+          # soxr defaults `-DWITH_OPENMP=ON` (parallel resampling), pulling
+          # in `libgomp` undefined refs (`GOMP_parallel`). Upstream's
+          # `soxr.pc.in` declares no `Libs.private`, and ffmpeg's libsoxr
+          # probe is `require` (not `require_pkg_config`) so .pc is unread
+          # anyway — the consumer would need `--extra-libs=-lgomp` to link.
+          # Since ffmpeg already parallelises audio resampling at the
+          # filtergraph level (libavfilter thread pool), soxr-OpenMP just
+          # creates thread-on-thread oversubscription — feature is
+          # redundant in this consumer, so we turn it off rather than
+          # threading libgomp through the link line for no real benefit.
+          soxrNoOmp = pkgs.pkgsStatic.soxr.overrideAttrs (oa: {
+            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [ "-DWITH_OPENMP=OFF" ];
+          });
+          # nixpkgs librist enables tests + built_tools by default. The
+          # cmocka-based test files (srp_examples.c, srp_unit.c) redefine
+          # `free` as `_test_free(...)` via a header pragma; cmocka 1.x +
+          # musl's stdlib (`__attribute_malloc__` decoration on `free`)
+          # collide and the test sources fail to compile. We don't need
+          # tests or CLI tools — disable both. Mainline librist.a builds
+          # clean once those targets are gone.
+          libristNoTest = pkgs.pkgsStatic.librist.overrideAttrs (oa: {
+            mesonFlags = (oa.mesonFlags or [ ]) ++ [
+              "-Dtest=false"
+              "-Dbuilt_tools=false"
+            ];
+          });
+          # nixpkgs qrencode pulls SDL2 in `nativeCheckInputs` to run the
+          # tests during the build. SDL2 → libglvnd which is `badPlatform`
+          # on pkgsStatic (no GL on musl). The library itself doesn't
+          # need SDL2 — only the test binary does. Disable the check
+          # phase; mainline libqrencode.a + headers install fine.
+          qrencodeNoCheck = pkgs.pkgsStatic.qrencode.overrideAttrs (oa: {
+            doCheck = false;
+          });
+          x265Static = pkgs.pkgsStatic.x265.overrideAttrs (oa: {
+            postBuild = (oa.postBuild or "") + ''
+              echo "merging libx265.a + libx265-10.a + libx265-12.a → unified libx265.a"
+              $AR -M <<'EOF'
+              CREATE libx265-merged.a
+              ADDLIB libx265.a
+              ADDLIB libx265-10.a
+              ADDLIB libx265-12.a
+              SAVE
+              END
+              EOF
+              mv libx265-merged.a libx265.a
+            '';
+            postInstall = "";
+          });
+          linuxExtras =
+            if isLinux then {
+              flags = [
+                "--enable-mbedtls"
+                "--enable-libsvtav1"
+                "--enable-libx265"
+                "--enable-libass"
+                "--enable-libfreetype"
+                "--enable-libharfbuzz"
+                "--enable-libfribidi"
+                "--enable-libwebp"
+                "--enable-libvpx"
+                "--enable-libsoxr"
+                "--enable-libtheora"
+                "--enable-libsrt"
+                "--enable-libaom"
+                "--enable-libopenjpeg"
+                "--enable-libxml2"
+                "--enable-libxvid"
+                "--enable-libmodplug"
+                "--enable-libtwolame"
+                "--enable-libspeex"
+                "--enable-libssh"
+                "--enable-libbluray"
+                "--enable-librtmp"
+                "--enable-librist"
+                "--enable-libqrencode"
+                "--enable-libfontconfig"
+                "--enable-libopencore-amrnb"
+                "--enable-libopencore-amrwb"
+              ];
+              # Multi-output deps need both outputs in buildInputs:
+              # `out` (the .a) plus `.dev` (the .pc + headers). Without
+              # `.dev`, ffmpeg's pkg-config probe fails silently. libwebp
+              # is single-output so the bare entry is enough.
+              inputs = with pkgs.pkgsStatic; [
+                mbedtls
+                libass    libass.dev
+                freetype  freetype.dev
+                harfbuzz  harfbuzz.dev
+                fribidi   fribidi.dev
+                libwebp
+                libvpx       libvpx.dev
+                libtheora    libtheora.dev
+                libaom       libaom.dev
+                openjpeg     openjpeg.dev
+                libxml2      libxml2.dev
+                libmodplug   libmodplug.dev
+                twolame
+                speex        speex.dev
+                fontconfig   fontconfig.dev
+                opencore-amr
+              ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev ];
+            } else { flags = [ ]; inputs = [ ]; };
+        in
+        mkFfmpeg pkgs.pkgsStatic {
+          extraConfigureFlags =
+            (if isDarwin then [ ] else [ "--enable-pthreads" ])
+            ++ linuxExtras.flags;
+          extraInputs = linuxExtras.inputs;
+        };
 
       # mingw: force pthreads (not w32threads) to match downstream codec
       # libs (x264, dav1d) that were built against pthreads.
