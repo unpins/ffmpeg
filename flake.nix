@@ -519,6 +519,7 @@
                 "--enable-libgme"
                 "--enable-libcaca"
                 "--enable-libcdio"
+                "--enable-libdrm"
               ];
               # Multi-output deps need both outputs in buildInputs:
               # `out` (the .a) plus `.dev` (the .pc + headers). Without
@@ -545,6 +546,7 @@
                 zvbi         zvbi.dev
                 libcdio      libcdio.dev
                 libcdio-paranoia
+                libdrm       libdrm.dev
               ] ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind rubberbandLean chromaprintLean gmeStatic libcacaTerm libcacaTerm.dev ];
             } else { flags = [ ]; inputs = [ ]; };
         in

@@ -56,6 +56,7 @@ On **Linux** the binary additionally includes:
 - **Captions:** libzvbi (DVB teletext + VBI closed captions)
 - **Fingerprint:** chromaprint muxer (AcoustID-compatible audio fingerprint)
 - **Output devices:** libcaca (color ASCII-art terminal output)
+- **Capture:** kmsgrab (KMS screen capture via libdrm — needs CAP_SYS_ADMIN or DRM master)
 
 The smaller macOS / Windows feature set keeps the package working on the cross-platform pkgsStatic toolchain that powers this build. Extending the extras across all targets is tracked separately.
 
