@@ -73,6 +73,47 @@
           # LDFLAGS=-static internally (same trap that hit htop / tmux),
           # so omit those too on darwin.
           ++ (if isDarwin then [ ]
+              else if isMinGW then [
+                # mingw single-binary policy: fold the toolchain runtime
+                # (libgcc, libstdc++, libwinpthread, libmcfgthread) into
+                # the .exe so we ship only `ffmpeg.exe` / `ffprobe.exe`,
+                # no DLLs next to them. `mingwStaticCross` covers USER
+                # libs (rewrites cc-wrapper to prefer `.a`), but the GCC
+                # driver still defaults to dynamic-libgcc/libstdc++.
+                #
+                # - `-static`: pick `.a` over `.dll.a` everywhere.
+                # - `-static-libgcc`: emit `-lgcc -lgcc_eh` instead of
+                #   `-lgcc_s -lgcc` from gcc's link spec.
+                # - `-static-libstdc++`: needed because x265/svt-av1/aom/
+                #   libwebp/libopenmpt/harfbuzz/chromaprint bring C++.
+                #
+                # Two gotchas required nix-lib companion overlays
+                # (`mingw-overlay/x265.nix` and the rust+mingw line
+                # below):
+                #
+                # 1. x265's CMake probes the toolchain for "what does
+                #    C++ EH need" and embeds the result in `x265.pc`'s
+                #    `Libs.private` — captured WITHOUT `-static-libgcc`,
+                #    so it bakes in `-lgcc_s ... -lgcc_s ...`. Every
+                #    `pkg-config --static x265 --libs` consumer
+                #    (ffmpeg's link) then re-injects `-lgcc_s` and the
+                #    linker prefers libgcc_s.dll.a (the .dll import
+                #    lib) over libgcc_eh.a. The overlay rewrites
+                #    `Libs.private` to the static-libgcc form.
+                #
+                # 2. `--allow-multiple-definition` is the canonical
+                #    rust + mingw cross workaround for librsvg-2.a
+                #    (rust) bundling `compiler_builtins` symbols
+                #    (`___chkstk_ms`, `__udivmodti4`, `__udivti3`)
+                #    that ffmpeg's own libgcc link adds again — the
+                #    COMDAT/weak marking doesn't survive the
+                #    dual-static-archive link path.
+                "--enable-static" "--disable-shared"
+                "--extra-ldflags=-static"
+                "--extra-ldflags=-static-libgcc"
+                "--extra-ldflags=-static-libstdc++"
+                "--extra-ldflags=-Wl,--allow-multiple-definition"
+              ]
               else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ])
           ++ extraConfigureFlags;
         in
@@ -122,6 +163,114 @@
 
           passthru = { pname = "ffmpeg"; inherit (pkgs.ffmpeg-headless) version; };
         };
+      # `mkExtras` returns the cross-platform set of feature flags and
+      # build inputs that ride on `sharedExtras`. Parameterised on a
+      # `pkgsStatic`-like scope so the same registry of fixes applies
+      # uniformly to linux, darwin, and mingw — each `nativeFixes.X` is
+      # platform-aware (no-op on platforms where the upstream is already
+      # fine).
+      mkExtras = pkgsStaticScope:
+        let
+          # Direct (no-feature-disable) fixes pulled in from nix-lib's
+          # native-overlay. See `nix-lib/native-overlay/<pkg>.nix` for
+          # the per-package rationale.
+          svtAv1NoLto    = ulib.nativeFixes.svt-av1        pkgsStaticScope;
+          x265Static     = ulib.nativeFixes.x265           pkgsStaticScope;
+          xvidStatic     = ulib.nativeFixes.xvidcore       pkgsStaticScope;
+          gmeStatic      = ulib.nativeFixes.game-music-emu pkgsStaticScope;
+          librsvgStatic  = ulib.nativeFixes.librsvg        pkgsStaticScope;
+          libvpxPkg      = ulib.nativeFixes.libvpx         pkgsStaticScope;
+          quircStatic    = ulib.nativeFixes.quirc          pkgsStaticScope;
+          # Feature-disable fixes that the user signed off on (the
+          # rationale lives in each fix file). srt/libssh swap crypto
+          # to mbedtls; rtmpdump drops .so + crypto; rubberband drops
+          # side-target plugins; librist/qrencode skip broken tests;
+          # libopenmpt + mpg123 drop CLI audio backends; soxr drops
+          # openmp; libbluray renames `dec_init` + (darwin) drops
+          # fontconfig.
+          soxrNoOmp       = ulib.nativeFixes.soxr       pkgsStaticScope;
+          srtMbed         = ulib.nativeFixes.srt        pkgsStaticScope;
+          libsshMbed      = ulib.nativeFixes.libssh     pkgsStaticScope;
+          rtmpdumpStatic  = ulib.nativeFixes.rtmpdump   pkgsStaticScope;
+          libristNoTest   = ulib.nativeFixes.librist    pkgsStaticScope;
+          qrencodeNoCheck = ulib.nativeFixes.qrencode   pkgsStaticScope;
+          rubberbandLean  = ulib.nativeFixes.rubberband pkgsStaticScope;
+          libbluraySafe   = ulib.nativeFixes.libbluray  pkgsStaticScope;
+          libopenmptLean  = ulib.nativeFixes.libopenmpt pkgsStaticScope;
+          chromaprintLean = ulib.nativeFixes.chromaprint pkgsStaticScope;
+          fftwPkg         = ulib.nativeFixes.fftw       pkgsStaticScope;
+          vidStabPkg      = ulib.nativeFixes.vid-stab   pkgsStaticScope;
+          speexdspPkg     = ulib.nativeFixes.speexdsp   pkgsStaticScope;
+          speexPkg        = ulib.nativeFixes.speex      pkgsStaticScope;
+        in {
+          flags = [
+            "--enable-mbedtls"
+            "--enable-libsvtav1"
+            "--enable-libx265"
+            "--enable-libwebp"
+            "--enable-libvpx"
+            "--enable-libsoxr"
+            "--enable-libtheora"
+            "--enable-libsrt"
+            "--enable-libaom"
+            "--enable-libopenjpeg"
+            "--enable-libxml2"
+            "--enable-libxvid"
+            "--enable-libopenmpt"
+            "--enable-libtwolame"
+            "--enable-libspeex"
+            "--enable-libssh"
+            "--enable-libbluray"
+            "--enable-librtmp"
+            "--enable-librist"
+            "--enable-libqrencode"
+            "--enable-libopencore-amrnb"
+            "--enable-libopencore-amrwb"
+            "--enable-libvidstab"
+            "--enable-librubberband"
+            "--enable-chromaprint"
+            "--enable-libzvbi"
+            "--enable-libgme"
+            "--enable-libquirc"
+            "--enable-libbs2b"
+            "--enable-libmysofa"
+            "--enable-libfreetype"
+            "--enable-libfribidi"
+            "--enable-librsvg"
+            "--enable-libass"
+            "--enable-libharfbuzz"
+            "--enable-libfontconfig"
+          ];
+          inputs = with pkgsStaticScope; [
+            mbedtls
+            libwebp
+          ] ++ [ libvpxPkg libvpxPkg.dev ] ++ (with pkgsStaticScope; [
+            libtheora    libtheora.dev
+            libaom       libaom.dev
+            openjpeg     openjpeg.dev
+            libxml2      libxml2.dev
+            libbs2b
+            libmysofa    libmysofa.dev
+            twolame
+            opencore-amr
+            zvbi         zvbi.dev
+          ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ]
+            ++ (with pkgsStaticScope; [
+              freetype  freetype.dev
+              fribidi   fribidi.dev
+              libass    libass.dev
+              harfbuzz  harfbuzz.dev
+              fontconfig fontconfig.dev
+            ])
+            ++ [ librsvgStatic librsvgStatic.dev ]
+            # libunwind only needed for musl Rust targets (librsvg's
+            # rustc --print=native-static-libs returns -lunwind).
+            # mingw uses SEH; libunwind doesn't build there (ucontext.h
+            # POSIX-only) and isn't needed.
+            ++ (if pkgsStaticScope.stdenv.hostPlatform.isMinGW or false
+                then [ ]
+                else [ pkgsStaticScope.libunwind ]);
+        };
     in
     ulib.mkStandaloneFlake {
       inherit self;
@@ -129,327 +278,42 @@
 
       # darwin's libSystem doesn't ship libpthread.a so --enable-pthreads
       # breaks the configure probe; linux is fine.
-      build = pkgs:
+      build = origPkgs:
         let
+          # Overlay darwin-specific structural fixes into `pkgsStatic`
+          # so every transitive consumer sees the patched libs (linux
+          # passes through unchanged — each `nativeFixes.X` short-circuits
+          # to `prev.X` on non-darwin).
+          #
+          # - `glib`: nixpkgs' linux→darwin meson cross-file lacks
+          #   `objc`/`objcpp` binaries; glib's `add_languages('objc')`
+          #   aborts. Fix injects a partial cross-file pointing at
+          #   `$CC`/`$CXX` (clang handles `.m`/`.mm`). Unblocks the
+          #   text-rendering chain (librsvg → pango → harfbuzz, libass).
+          # - `graphite2`: cmake `nolib_test` uses
+          #   `$<TARGET_SONAME_FILE>` which CMake refuses for STATIC
+          #   libs. Upstream guards the call with `if (BUILD_SHARED_LIBS)`
+          #   in the Linux branch but forgets to do it in the Darwin
+          #   branch. Fix mirrors the guard. Pulled by harfbuzz.
+          # - `fontconfig`: two upstream tests compare sysroot paths as
+          #   strings; darwin's `/tmp → /private/tmp` symlink makes them
+          #   disagree. Test bug, not a fontconfig defect — fix turns
+          #   `doCheck` off on darwin. Pulled transitively by cairo.
+          # - `pango`: same `add_languages('objc')` cross-file gap as
+          #   glib, for the Core Text font backend; same fix.
+          pkgs =
+            if origPkgs.stdenv.hostPlatform.isDarwin
+            then origPkgs // {
+              pkgsStatic = origPkgs.pkgsStatic.extend (final: prev: {
+                glib       = ulib.nativeFixes.glib       prev;
+                graphite2  = ulib.nativeFixes.graphite2  prev;
+                fontconfig = ulib.nativeFixes.fontconfig prev;
+                pango      = ulib.nativeFixes.pango      prev;
+              });
+            }
+            else origPkgs;
           isDarwin = pkgs.stdenv.isDarwin;
           isLinux = pkgs.stdenv.hostPlatform.isLinux;
-          # nixpkgs's svt-av1 defaults to `-DSVT_AV1_LTO=ON` which makes the
-          # static archive ship only LTO IR (`__gnu_lto_slim` is the only
-          # symbol the regular .symtab carries). ffmpeg's pkg-config link
-          # probe calls ld.bfd without `-flto`/the LTO plugin, so the probe
-          # fails with `undefined reference to svt_av1_enc_init_handle`.
-          # Append `-DSVT_AV1_LTO=OFF` (cmake takes last-wins for `-D…`).
-          svtAv1NoLto = (pkgs.pkgsStatic.svt-av1.overrideAttrs (oa: {
-            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [ "-DSVT_AV1_LTO=OFF" ];
-          }));
-          # nixpkgs x265 in pkgsStatic needs two surgical patches:
-          #
-          #  1. Multi-bit-depth archives stay separate. With the default
-          #     `multibitdepthSupport = true`, the x265 build produces
-          #     three archives — main (8-bit), `libx265-10.a`,
-          #     `libx265-12.a` — and the main archive references
-          #     `x265_10bit::` / `x265_12bit::` symbols from the siblings.
-          #     The dynamic-lib build merges them into a single `.so`;
-          #     pkgsStatic suppresses the `.so` and leaves the static
-          #     archives unmerged, so any consumer linking `-lx265` sees
-          #     undefined references. We merge the three with `ar -M`
-          #     into a self-contained `libx265.a` (postBuild). Cutting
-          #     `multibitdepthSupport` instead would drop Main10 (HDR10)
-          #     and Main12 — too much loss for a static-lib rebundle.
-          #
-          #  2. `rm -f $out/lib/*.a` in upstream postInstall — correct for
-          #     the dynamic default, fatal for pkgsStatic. Replace with
-          #     an empty postInstall.
-          # libbluray.a exposes plenty of internal symbols as globals
-          # (decode_*, udfread_*, dec_*) instead of `static`. `dec_init`
-          # in particular collides with ffmpeg's own `dec_init` in
-          # fftools/ffmpeg_dec.c at static link time. Localize it via
-          # `objcopy --localize-symbol`: keeps the public bd_* API
-          # globally visible but makes the colliding name file-local.
-          # Targeted (one symbol) rather than wholesale whitelist —
-          # extend the list if other collisions surface.
-          # nixpkgs `pkgsStatic.rtmpdump`: two issues stacked.
-          #
-          #  1. Makefile's `SHARED=yes` default builds librtmp.so.1
-          #     unconditionally; pkgsStatic toolchain can't link `.so`
-          #     (crtbeginT.o R_X86_64_32 against __TMC_END__). Override
-          #     `SHARED=no` so the top-level `all` target reduces to
-          #     just `librtmp.a`.
-          #
-          #  2. Default `CRYPTO=OPENSSL` drags OpenSSL back into the
-          #     closure (we worked to remove it via mbedtls swap on srt
-          #     and libssh). Override to `CRYPTO=` (empty) which maps
-          #     to `DEF_=-DNO_CRYPTO` in the Makefile — drops RTMPS via
-          #     librtmp. ffmpeg's own protocol handlers cover `rtmps://`
-          #     through `--enable-mbedtls`, so the user-visible feature
-          #     is preserved; we just don't route RTMPS through
-          #     librtmp anymore. POLARSSL is the only no-OpenSSL knob
-          #     librtmp ships, but its API is mbedtls 1.x/2.x — won't
-          #     compile against modern 3.x without API shims.
-          rtmpdumpStatic = pkgs.pkgsStatic.rtmpdump.overrideAttrs (oa: {
-            makeFlags = (oa.makeFlags or [ ]) ++ [ "SHARED=no" "CRYPTO=" ];
-            propagatedBuildInputs = [ pkgs.pkgsStatic.zlib ];
-          });
-          # libbluray's buildInputs unconditionally include fontconfig
-          # (no `--without-fontconfig` knob in upstream configure).
-          # On darwin pkgsStatic the fontconfig closure pulls
-          # dejavu-fonts → fontforge → python3 → cross-bash, which
-          # fails to evaluate on aarch64-darwin cross-from-darwin
-          # (bash 5.3p3 binary path is missing from the cross closure).
-          # libbluray uses fontconfig only at runtime (for menu/OSD
-          # font discovery) — it's not a link-time requirement of the
-          # `bd_*` C API ffmpeg exercises. Drop the dep from
-          # buildInputs and propagatedBuildInputs on darwin; ffmpeg's
-          # libbluray probe still passes (only headers + bd_open
-          # link probe). Menu rendering would degrade if a consumer
-          # invokes the BD-J UI path, which ffmpeg's libbluray demuxer
-          # does not.
-          libbluraySafe = (pkgs.pkgsStatic.libbluray.override (
-            if isDarwin
-            then { fontconfig = pkgs.pkgsStatic.emptyDirectory; }
-            else { }
-          )).overrideAttrs (oa: {
-            # libbluray's autoconf has `--without-fontconfig` (Linux
-            # uses it for menu fonts; ffmpeg's libbluray demuxer
-            # doesn't touch that path). Add the flag on darwin and
-            # filter fontconfig out of buildInputs so the eval/build
-            # doesn't traverse the dejavu→fontforge→cross-bash chain.
-            configureFlags = (oa.configureFlags or [ ])
-              ++ pkgs.lib.optional isDarwin "--without-fontconfig";
-            buildInputs = pkgs.lib.optionals (!isDarwin) (oa.buildInputs or [ ])
-              ++ pkgs.lib.optionals isDarwin (builtins.filter
-                (d: !(d.pname or null == "fontconfig"))
-                (oa.buildInputs or [ ]));
-            # libbluray.a leaks internal helpers as globals — `dec_init`
-            # in particular collides with ffmpeg's own `dec_init` in
-            # fftools/ffmpeg_dec.c at static link time. `--localize-
-            # symbol` makes it file-local to dec.o, but then sibling
-            # object disc.o (calling dec_init) loses access. Use
-            # `--redefine-sym` instead: rewrites both the definition
-            # *and* internal references inside every .o of the archive,
-            # so libbluray stays self-consistent while the renamed
-            # symbol no longer matches ffmpeg's `dec_init`.
-            postInstall = (oa.postInstall or "") + ''
-              # Mach-O symbols carry a leading underscore by convention
-              # (clang C ABI), ELF does not. `$OBJCOPY --redefine-sym`
-              # is the literal bytes that get rewritten in the symbol
-              # table, so we must spell the underscore form on darwin.
-              echo "renaming dec_init -> bluray_internal_dec_init in libbluray.a"
-              $OBJCOPY ${if isDarwin
-                then "--redefine-sym=_dec_init=_bluray_internal_dec_init"
-                else "--redefine-sym=dec_init=bluray_internal_dec_init"} \
-                $out/lib/libbluray.a
-            '';
-          });
-          # nixpkgs `pkgsStatic.libssh` defaults to OpenSSL via
-          # `find_package(OpenSSL)`. Like srt, swap to mbedtls so we keep
-          # one crypto backend in the closure. libssh's CMake supports
-          # `-DWITH_MBEDTLS=ON` (ships its own `FindMbedTLS.cmake`).
-          # buildInputs reordered (no openssl); propagatedBuildInputs
-          # MUST be replaced (pkgsStatic auto-promotes buildInputs into
-          # it — see [[pkgsstatic-propagated-buildinputs]] /
-          # [[srt-pkgsstatic-mbedtls-swap]]).
-          libsshMbed = pkgs.pkgsStatic.libssh.overrideAttrs (oa: {
-            buildInputs = [
-              pkgs.pkgsStatic.zlib
-              pkgs.pkgsStatic.mbedtls
-              pkgs.pkgsStatic.libsodium
-            ];
-            propagatedBuildInputs = [
-              pkgs.pkgsStatic.zlib
-              pkgs.pkgsStatic.mbedtls
-              pkgs.pkgsStatic.libsodium
-            ];
-            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [ "-DWITH_MBEDTLS=ON" ];
-            # libssh's libssh.pc.cmake leaves Requires.private empty for
-            # the crypto backend (CMakeLists only appends gssapi to
-            # `LIBSSH_PC_REQUIRES_PRIVATE`). Without it, consumers
-            # using `pkg-config --static` get no transitive crypto link
-            # flags — ffmpeg's probe fails with `mbedtls_*` undefined.
-            # Inject Requires.private so pkg-config resolves mbedtls.pc
-            # / libsodium.pc / zlib.pc and emits the missing -L/-l.
-            # postFixup (not postInstall) — multipleOutputsPhase moves
-            # the .pc to $dev after install runs, so sed needs to wait.
-            postFixup = (oa.postFixup or "") + ''
-              # Append (CMake drops the Requires.private line entirely
-              # when LIBSSH_PC_REQUIRES_PRIVATE is empty), don't try to
-              # replace.
-              echo 'Requires.private: mbedtls libsodium zlib' \
-                >> $dev/lib/pkgconfig/libssh.pc
-            '';
-          });
-          # nixpkgs xvidcore: Makefile always builds both libxvidcore.a
-          # AND libxvidcore.so.4.3. pkgsStatic toolchain fails the .so
-          # link with `R_X86_64_32 against hidden symbol __TMC_END__` —
-          # static-PIE startup (crtbeginT.o) can't go into a shared
-          # object. Build only the static target. Also drop the
-          # upstream `rm $out/lib/*.a` postInstall trap (same shape as
-          # x265 — see [[x265-pkgsstatic-recipe]]).
-          xvidStatic = pkgs.pkgsStatic.xvidcore.overrideAttrs (oa: {
-            # Build only the static target; xvid's Makefile's default
-            # 'all' goal also makes the .so which the pkgsStatic
-            # toolchain can't link.
-            makeFlags = (oa.makeFlags or [ ]) ++ [ "libxvidcore.a" ];
-            # Skip 'make install' (it wants the .so we didn't build).
-            # Install the .a + header by hand instead. The .a lands in
-            # `=build/` (a literal directory name xvid uses) inside the
-            # configure cwd build/generic/.
-            installPhase = ''
-              runHook preInstall
-              install -Dm644 =build/libxvidcore.a $out/lib/libxvidcore.a
-              install -Dm644 ../../src/xvid.h $out/include/xvid.h
-              runHook postInstall
-            '';
-            postInstall = "";
-          });
-          # nixpkgs `pkgsStatic.srt` defaults to openssl crypto. We already
-          # carry mbedtls in this flake for `--enable-mbedtls`, so swap srt
-          # to the same backend: drops openssl from the closure entirely
-          # (no double-crypto). srt's CMake supports
-          # `-DUSE_ENCLIB=mbedtls` and ships `scripts/FindMbedTLS.cmake`,
-          # which discovers our static mbedtls via CMAKE_PREFIX_PATH.
-          srtMbed = pkgs.pkgsStatic.srt.overrideAttrs (oa: {
-            buildInputs = [ pkgs.pkgsStatic.mbedtls ]
-              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isMinGW [
-                pkgs.pkgsStatic.windows.pthreads
-              ];
-            # srt's CMake bakes absolute /nix/store/.../libmbedtls.a paths
-            # into `Libs.private` of `srt.pc`. ffmpeg's `--pkg-config-
-            # flags=--static` probe puts those absolute paths *before*
-            # the test object on the link command, and `-Wl,--as-needed`
-            # drops them (no unresolved refs yet); then `-lsrt` (after
-            # test.o) introduces mbedtls refs that nothing remains to
-            # resolve. Rewrite to `-l` form and propagate mbedtls so the
-            # cc-wrapper appends `-L${mbedtls}/lib -lmbedtls…` at the
-            # tail of the link line, after `-lsrt`.
-            # pkgsStatic auto-promotes buildInputs → propagatedBuildInputs
-            # at scope creation, so the original openssl from upstream's
-            # buildInputs is already sitting in `oa.propagatedBuildInputs`.
-            # We must *replace*, not extend, or openssl stays in the closure.
-            propagatedBuildInputs = [ pkgs.pkgsStatic.mbedtls ];
-            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [
-              "-DUSE_ENCLIB=mbedtls"
-              "-DENABLE_APPS=OFF"
-            ];
-            postInstall = (oa.postInstall or "") + ''
-              sed -i -E 's|[^ ]*/lib(mbed[a-z0-9]+)\.a|-l\1|g' \
-                $out/lib/pkgconfig/srt.pc
-            '';
-          });
-          # soxr defaults `-DWITH_OPENMP=ON` (parallel resampling), pulling
-          # in `libgomp` undefined refs (`GOMP_parallel`). Upstream's
-          # `soxr.pc.in` declares no `Libs.private`, and ffmpeg's libsoxr
-          # probe is `require` (not `require_pkg_config`) so .pc is unread
-          # anyway — the consumer would need `--extra-libs=-lgomp` to link.
-          # Since ffmpeg already parallelises audio resampling at the
-          # filtergraph level (libavfilter thread pool), soxr-OpenMP just
-          # creates thread-on-thread oversubscription — feature is
-          # redundant in this consumer, so we turn it off rather than
-          # threading libgomp through the link line for no real benefit.
-          soxrNoOmp = pkgs.pkgsStatic.soxr.overrideAttrs (oa: {
-            cmakeFlags = (oa.cmakeFlags or [ ]) ++ [ "-DWITH_OPENMP=OFF" ];
-          });
-          # nixpkgs librist enables tests + built_tools by default. The
-          # cmocka-based test files (srp_examples.c, srp_unit.c) redefine
-          # `free` as `_test_free(...)` via a header pragma; cmocka 1.x +
-          # musl's stdlib (`__attribute_malloc__` decoration on `free`)
-          # collide and the test sources fail to compile. We don't need
-          # tests or CLI tools — disable both. Mainline librist.a builds
-          # clean once those targets are gone.
-          libristNoTest = pkgs.pkgsStatic.librist.overrideAttrs (oa: {
-            mesonFlags = (oa.mesonFlags or [ ]) ++ [
-              "-Dtest=false"
-              "-Dbuilt_tools=false"
-            ];
-          });
-          # nixpkgs qrencode pulls SDL2 in `nativeCheckInputs` to run the
-          # tests during the build. SDL2 → libglvnd which is `badPlatform`
-          # on pkgsStatic (no GL on musl). The library itself doesn't
-          # need SDL2 — only the test binary does. Disable the check
-          # phase; mainline libqrencode.a + headers install fine.
-          qrencodeNoCheck = pkgs.pkgsStatic.qrencode.overrideAttrs (oa: {
-            doCheck = false;
-          });
-          # nixpkgs `pkgsStatic.librsvg`: meson runs
-          # `rustc --target=x86_64-unknown-linux-musl --print=native-static-libs`
-          # which prints `-lunwind -lc`, then calls
-          # `cc.find_library('unwind', static: true)` for each — see
-          # librsvg meson.build:375. nixpkgs doesn't ship libunwind in
-          # the librsvg buildInputs because the dynamic-lib build resolves
-          # `_Unwind_*` via libgcc_s at runtime. In pkgsStatic the probe
-          # is hard-required. Alpine builds librsvg as `.so` only and
-          # doesn't pass `-Ddefault_library=static`, so the probe never
-          # fires — that's why their APKBUILD looks clean.
-          #
-          # Fix: feed the GCC libunwind (1.8.x, ~250 KB) as a buildInput.
-          # llvmPackages.libunwind also works but is 4× the size; both
-          # export the same `_Unwind_*` ABI so the static link succeeds
-          # either way.
-          librsvgStatic = pkgs.pkgsStatic.librsvg.overrideAttrs (oa: {
-            buildInputs = (oa.buildInputs or [ ]) ++ [ pkgs.pkgsStatic.libunwind ];
-          });
-          # nixpkgs `pkgsStatic.rubberband` pulls vamp-plugin-sdk + lv2
-          # + ladspa-header + jdk_headless as build inputs because the
-          # upstream Makefile *emits* a Vamp plugin / LADSPA plugin / LV2
-          # plugin / Java JNI binding as side-targets. The core
-          # `librubberband.a` doesn't consume any of them at link time —
-          # they're separate `.so` outputs the build produces from the
-          # same source tree. In pkgsStatic, the Vamp SDK's Makefile
-          # unconditionally links `libvamp-sdk.so` (no SHARED-toggle knob),
-          # which fails crtbeginT.o R_X86_64_32 — the now-familiar static-
-          # PIE-in-shared-object trap. Disabling all four side-plugins
-          # at meson configure (`-Dvamp=disabled` etc) drops every dep
-          # we don't need and reduces the chain to fftw + libsamplerate.
-          # propagatedBuildInputs must also be replaced (not extended) —
-          # pkgsStatic auto-promotes upstream buildInputs into it, see
-          # [[pkgsstatic-propagated-buildinputs]] /
-          # [[srt-pkgsstatic-mbedtls-swap]].
-          # nixpkgs `pkgsStatic.chromaprint` carrega `ffmpeg-headless`
-          # em buildInputs por causa do binário `fpcalc` (CLI tool que
-          # decodifica áudio via libav* antes de fingerprintar). A lib
-          # `libchromaprint.a` em si não toca em libavcodec — o decode
-          # é gerado pelo consumer. Em pkgsStatic isso vira circular
-          # (queremos ffmpeg → chromaprint, mas chromaprint → ffmpeg)
-          # E pior: o ffmpeg-headless de upstream puxa libpulseaudio em
-          # propagatedBuildInputs, que é `badPlatform` em musl.
-          # Disable `withTools` + `withExamples` + zera buildInputs +
-          # propagatedBuildInputs. zlib não é necessário pra core lib.
-          chromaprintLean = (pkgs.pkgsStatic.chromaprint.override {
-            withTools = false;
-            withExamples = false;
-          }).overrideAttrs (oa: {
-            buildInputs = [ ];
-            propagatedBuildInputs = [ ];
-            # libchromaprint.a é C++ (sources em src/*.cpp). Upstream's
-            # libchromaprint.pc omite Libs.private — em distros normais
-            # o consumer dynamic-lib pega libstdc++.so do sistema. Em
-            # pkgsStatic + ffmpeg `--pkg-config-flags=--static`, sem
-            # Libs.private o probe `chromaprint_get_version` link falha
-            # com `undefined reference to __cxa_*` e `cosf`. Appendar
-            # explicitamente.
-            postInstall = (oa.postInstall or "") + ''
-              # chromaprint's CMake auto-selects FFT_LIB=vdsp on darwin
-              # → libchromaprint.a references vDSP_* symbols from
-              # Apple's Accelerate framework. Append -framework
-              # Accelerate so consumer link probes (ffmpeg's
-              # --pkg-config-flags=--static) resolve those symbols.
-              # Also: clang on darwin uses libc++ (not libstdc++) for
-              # the C++ runtime.
-              echo 'Libs.private: ${if isDarwin
-                then "-lc++ -lm -framework Accelerate"
-                else "-lstdc++ -lm"}' \
-                >> $out/lib/pkgconfig/libchromaprint.pc
-            '';
-          });
-          # nixpkgs `pkgsStatic.game-music-emu` postFixup faz
-          # `remove-references-to -t cc $(readlink -f $out/lib/libgme.so)`
-          # — em pkgsStatic não há .so; readlink retorna vazio e o
-          # `remove-references-to` fallback pra sed sem input gera
-          # "sed: no input files" → exit 1. Como não temos .so, drop
-          # postFixup inteiro (a .a já não referencia o gcc do build).
-          gmeStatic = pkgs.pkgsStatic.game-music-emu.overrideAttrs (oa: {
-            postFixup = "";
-          });
           # nixpkgs `pkgsStatic.libcaca` puxa `imlib2 (x11Support=true)` +
           # libX11 + libXext porque o default da recipe é `x11Support ?
           # !stdenv.isDarwin`. Em pkgsStatic isso quebra (imlib2 com X11
@@ -467,98 +331,6 @@
           # install ao subdir `caca/` (que tem o .a + caca.pc + headers,
           # tudo que ffmpeg precisa). Outputs vão pra ["out" "dev"] (sem
           # `bin` porque não buildamos `tools/caca-config`).
-          # nixpkgs `pkgsStatic.quirc`: Makefile `all` builda
-          # `libquirc.so + qrtest` por default; em pkgsStatic o .so
-          # falha com `R_X86_64_32 against __TMC_END__` (mesma
-          # família xvidcore/libcaca). Plus, upstream postInstall faz
-          # `rm $out/lib/libquirc.a` (pro caso .so), e o Makefile NÃO
-          # gera `quirc.pc` — sem .pc, ffmpeg `check_pkg_config quirc`
-          # falha. Fix: build `libquirc.a` direto, install handmade,
-          # gerar .pc minimalista. libjpeg/libpng em buildInputs upstream
-          # são pra qrtest CLI; consumer só usa o lib core — manter
-          # buildInputs intactos é seguro (consumer não link contra
-          # esses; só configure-time).
-          quircStatic = pkgs.pkgsStatic.quirc.overrideAttrs (oa: {
-            buildPhase = ''
-              runHook preBuild
-              # Makefile do quirc faz `$(shell pkg-config --cflags sdl)`
-              # no top — sem sdl.pc, captura STDERR como output e injeta
-              # em CFLAGS. Passar vazios neutraliza o probe.
-              make libquirc.a SDL_CFLAGS= SDL_LIBS=
-              runHook postBuild
-            '';
-            installPhase = ''
-              runHook preInstall
-              install -Dm644 libquirc.a $out/lib/libquirc.a
-              install -Dm644 lib/quirc.h $out/include/quirc.h
-              mkdir -p $out/lib/pkgconfig
-              cat > $out/lib/pkgconfig/quirc.pc <<EOF
-              prefix=$out
-              exec_prefix=$out
-              libdir=$out/lib
-              includedir=$out/include
-
-              Name: quirc
-              Description: QR code recognition library
-              Version: 1.2
-              Libs: -L\''${libdir} -lquirc
-              Libs.private: -lm
-              Cflags: -I\''${includedir}
-              EOF
-              runHook postInstall
-            '';
-            postInstall = "";
-            preInstall = "";
-          });
-          # libopenmpt em pkgsStatic puxa uma chain de audio backends que
-          # não fazem sentido em static (ffmpeg só consome o decoder core):
-          #
-          #  1. `mpg123` default vem com `withPulse=true` em Linux → puxa
-          #     `libpulseaudio` que tem badPlatforms.isStatic. Override
-          #     pra `libOnly = true` (só a lib, sem CLI player + sem
-          #     audio backends ALSA/Pulse/JACK).
-          #  2. `portaudio` é puxado mas só serve pro CLI `openmpt123`,
-          #     não pra libopenmpt.a. Em pkgsStatic puxa alsa-lib +
-          #     libjack2 que adicionam complexidade. Suprimir.
-          #  3. `libsndfile` mesmo caso — só CLI. Suprimir.
-          #  4. `usePulseAudio = false` é o flag direto do libopenmpt
-          #     pra desativar o link contra libpulseaudio (independente
-          #     do que mpg123 propaga).
-          mpg123Lib = pkgs.pkgsStatic.mpg123.override {
-            libOnly = true;
-            # assert: withConplay → !libOnly. CLI tool inútil sem o lib full.
-            withConplay = false;
-          };
-          libopenmptLean = (pkgs.pkgsStatic.libopenmpt.override {
-            usePulseAudio = false;
-            mpg123 = mpg123Lib;
-          }).overrideAttrs (oa: {
-            # ffmpeg consome só `libopenmpt.a` decoder core. Drop:
-            #  - portaudio/sndfile: backends de áudio pro CLI
-            #  - openmpt123 CLI: player command-line (puxa portaudio
-            #    transitively, e bin/openmpt123 ficaria órfão sem ele)
-            #  - examples/tests: economia de tempo
-            configureFlags = (oa.configureFlags or [ ]) ++ [
-              "--without-portaudio"
-              "--without-portaudiocpp"
-              "--without-sndfile"
-              "--disable-openmpt123"
-              "--disable-tests"
-              "--disable-examples"
-            ];
-            # Sem openmpt123 não há nada pra colocar em $bin
-            outputs = [ "out" "dev" ];
-            buildInputs = builtins.filter
-              (d:
-                let p = d.pname or null; in
-                p != "portaudio" && p != "libsndfile")
-              (oa.buildInputs or [ ]);
-            propagatedBuildInputs = builtins.filter
-              (d:
-                let p = d.pname or null; in
-                p != "portaudio" && p != "libsndfile" && p != "libpulseaudio")
-              (oa.propagatedBuildInputs or [ ]);
-          });
           libcacaTerm = (pkgs.pkgsStatic.libcaca.override { x11Support = false; }).overrideAttrs (oa: {
             outputs = [ "out" "dev" ];
             buildPhase = ''
@@ -585,220 +357,7 @@
                 >> $dev/lib/pkgconfig/caca.pc
             '';
           });
-          rubberbandLean = (pkgs.pkgsStatic.rubberband.override {
-            # callPackage-level fftw swap so the original rubberband
-            # derivation's `buildInputs = [...fftw...]` resolves to our
-            # openmp-free fftw on darwin (avoiding the python3-broken
-            # chain). overrideAttrs would be too late — the .eval of
-            # `pkgs.pkgsStatic.rubberband` already triggers fftw eval.
-            fftw = fftwPkg;
-          }).overrideAttrs (oa: {
-            nativeBuildInputs = builtins.filter
-              (d: !(d.pname or null == "openjdk-headless"))
-              (oa.nativeBuildInputs or [ ]);
-            buildInputs = [ fftwPkg pkgs.pkgsStatic.libsamplerate ];
-            propagatedBuildInputs = [ fftwPkg pkgs.pkgsStatic.libsamplerate ];
-            mesonFlags = (oa.mesonFlags or [ ]) ++ [
-              "-Dvamp=disabled"
-              "-Dladspa=disabled"
-              "-Dlv2=disabled"
-              "-Djni=disabled"
-              "-Dcmdline=disabled"
-              "-Dtests=disabled"
-              "-Dfft=fftw"
-              "-Dresampler=libsamplerate"
-            ];
-          });
-          # nixpkgs `libvpx` package.nix references the legacy
-          # `stdenv.hostPlatform.osxMinVersion`, which was renamed to
-          # `darwinMinVersion` in the current nixpkgs systems lib (see
-          # lib/systems/default.nix:364). The package wasn't updated so
-          # eval crashes on darwin with "attribute 'osxMinVersion'
-          # missing". Bridge the rename by injecting `osxMinVersion` into
-          # the hostPlatform attrset before package.nix reads it. The
-          # value drives a `darwin${N}` kernel tag in libvpx's `target`
-          # (configure --target=...); darwinMinVersion is "14.0" in this
-          # pin, so libvpx will tag itself as darwin14 — correct for any
-          # macOS 10.10+ deployment target.
-          # speex (codec) propagates speexdsp (echo cancel / signal
-          # helpers); speexdsp defaults to `withFftw3 = true` which pulls
-          # fftw. On pkgsStatic-darwin fftw drags in LLVM `openmp` which
-          # has `python3` in propagated chain — and python3 is `broken`
-          # in pkgsStatic-darwin. ffmpeg's `--enable-libspeex` only uses
-          # the speex *codec* (encoder/decoder), not speexdsp's FFT —
-          # so dropping FFT support saves the whole openmp/python chain.
-          # Same toggle for speex itself (`withFft` controls whether the
-          # echo-cancel demo code links against fftw — also unused by
-          # ffmpeg's libspeex probe).
-          # vid.stab on darwin clang propagates LLVM `openmp` for
-          # parallel stabilization; openmp's static build has `python3`
-          # in propagated chain — and python3 is `broken` in
-          # pkgsStatic-darwin. Drop openmp propagation; CMake's
-          # `find_package(OpenMP)` returns false at vid.stab configure,
-          # the library falls back to sequential transforms. We don't
-          # pay throughput attention here (single-clip stabilization is
-          # latency-bound, not throughput-bound).
-          vidStabPkg =
-            if isDarwin
-            then pkgs.pkgsStatic.vid-stab.overrideAttrs (_oa: {
-              propagatedBuildInputs = [ ];
-              buildInputs = [ ];
-            })
-            else pkgs.pkgsStatic.vid-stab;
-          # fftw in nixpkgs hard-codes `--enable-openmp` and pulls
-          # `llvmPackages.openmp` as a buildInput on clang stdenvs.
-          # On pkgsStatic-darwin that chain hits `python3` (broken).
-          # Drop the openmp inputs + the configure flag; fftw still
-          # builds with `--enable-threads` (pthread parallelism), which
-          # is what rubberband actually consumes — librubberband.so
-          # doesn't dlopen OpenMP runtime, it just uses fftw_plan_*
-          # serial/threaded. Saves the openmp/python chain entirely.
-          fftwPkg =
-            if isDarwin
-            then (pkgs.pkgsStatic.fftw.override {
-              # callPackage swap: replace `llvmPackages.openmp` with an
-              # empty placeholder so the initial fftw eval doesn't
-              # traverse openmp's propagated python3 (broken on
-              # pkgsStatic-darwin). overrideAttrs below drops the
-              # placeholder from buildInputs and the `--enable-openmp`
-              # configure flag, leaving fftw configured for pthread-only
-              # parallelism (which is what rubberband consumes anyway).
-              llvmPackages = { openmp = pkgs.pkgsStatic.emptyDirectory; };
-            }).overrideAttrs (oa: {
-              buildInputs = [ ];
-              # gfortran is in fftw's nativeBuildInputs but unused at
-              # configure time (no --enable-fortran flag). On
-              # cross-darwin from linux, building an x86_64-apple-
-              # darwin-gfortran wrapper pulls a full GCC cross with
-              # `objc,obj-c++` languages enabled — and that cross-gcc
-              # build itself fails (missing isl 0.15+, missing darwin
-              # objc bridge). Drop gfortran outright since fftw doesn't
-              # actually need it for the C-only build path.
-              nativeBuildInputs = builtins.filter
-                (d: !(d.pname or null == "gfortran-wrapper"))
-                (oa.nativeBuildInputs or [ ]);
-              configureFlags =
-                builtins.filter (f: f != "--enable-openmp") oa.configureFlags;
-            })
-            else pkgs.pkgsStatic.fftw;
-          speexdspPkg =
-            if isDarwin
-            then pkgs.pkgsStatic.speexdsp.override { withFftw3 = false; }
-            else pkgs.pkgsStatic.speexdsp;
-          speexPkg =
-            if isDarwin
-            then pkgs.pkgsStatic.speex.override {
-              withFft = false;
-              speexdsp = speexdspPkg;
-            }
-            else pkgs.pkgsStatic.speex;
-          libvpxDarwinFix = (pkgs.pkgsStatic.libvpx.override {
-            stdenv = pkgs.pkgsStatic.stdenv // {
-              hostPlatform = pkgs.pkgsStatic.stdenv.hostPlatform // {
-                # nixpkgs libvpx's package.nix reads `osxMinVersion`,
-                # which was renamed to `darwinMinVersion` in modern
-                # nixpkgs systems lib — eval crashes without a
-                # placeholder. The value used here is purely a stand-in
-                # to make eval succeed; we override the bad
-                # `--target=…-darwin14-gcc` flag below.
-                osxMinVersion = "10.10";
-              };
-            };
-          }).overrideAttrs (oa: {
-            # The libvpx package.nix maps to a maximum of `darwin14`
-            # (macOS 10.10), which in libvpx's own configure injects
-            # `-mmacosx-version-min=10.10` into CFLAGS+LDFLAGS. The
-            # macOS 14.4 SDK headers then reject calls like
-            # `CLOCK_MONOTONIC_RAW` (available only from 10.12+).
-            # libvpx supports up to `darwin25` (macOS 15+) — rewrite
-            # the configure flag to target darwin23 (macOS 14, matching
-            # nixpkgs's `darwinMinVersion = "14.0"`) so the SDK
-            # availability check passes.
-            configureFlags =
-              (builtins.filter
-                (f: !(pkgs.lib.hasPrefix "--target=x86_64-darwin" f
-                  || pkgs.lib.hasPrefix "--target=arm64-darwin" f
-                  || pkgs.lib.hasPrefix "--target=aarch64-darwin" f))
-                oa.configureFlags)
-              ++ [
-                "--target=${
-                  if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x86_64"
-                }-darwin23-gcc"
-              ];
-          });
-          libvpxPkg =
-            if isDarwin then libvpxDarwinFix else pkgs.pkgsStatic.libvpx;
-          x265Static = pkgs.pkgsStatic.x265.overrideAttrs (oa: {
-            postBuild = (oa.postBuild or "") + ''
-              echo "merging libx265.a + libx265-10.a + libx265-12.a → unified libx265.a"
-              $AR -M <<'EOF'
-              CREATE libx265-merged.a
-              ADDLIB libx265.a
-              ADDLIB libx265-10.a
-              ADDLIB libx265-12.a
-              SAVE
-              END
-              EOF
-              mv libx265-merged.a libx265.a
-            '';
-            postInstall = "";
-          });
-          # Shared extras run on both Linux and Darwin (pkgsStatic). All
-          # deps below are portable codec/protocol/filter libraries — no
-          # kernel-specific stuff (KMS/X11/CDDA/etc). Linux-only items
-          # live in `linuxOnlyExtras` below.
-          sharedExtras = {
-            flags = [
-              "--enable-mbedtls"
-              "--enable-libsvtav1"
-              "--enable-libx265"
-              "--enable-libwebp"
-              "--enable-libvpx"
-              "--enable-libsoxr"
-              "--enable-libtheora"
-              "--enable-libsrt"
-              "--enable-libaom"
-              "--enable-libopenjpeg"
-              "--enable-libxml2"
-              "--enable-libxvid"
-              "--enable-libopenmpt"
-              "--enable-libtwolame"
-              "--enable-libspeex"
-              "--enable-libssh"
-              "--enable-libbluray"
-              "--enable-librtmp"
-              "--enable-librist"
-              "--enable-libqrencode"
-              "--enable-libopencore-amrnb"
-              "--enable-libopencore-amrwb"
-              "--enable-libvidstab"
-              "--enable-librubberband"
-              "--enable-chromaprint"
-              "--enable-libzvbi"
-              "--enable-libgme"
-              "--enable-libquirc"
-              "--enable-libbs2b"
-              "--enable-libmysofa"
-            ];
-            # Multi-output deps need both outputs in buildInputs:
-            # `out` (the .a) plus `.dev` (the .pc + headers). Without
-            # `.dev`, ffmpeg's pkg-config probe fails silently. libwebp
-            # is single-output so the bare entry is enough.
-            inputs = with pkgs.pkgsStatic; [
-              mbedtls
-              libwebp
-            ] ++ [ libvpxPkg libvpxPkg.dev ] ++ (with pkgs.pkgsStatic; [
-              libtheora    libtheora.dev
-              libaom       libaom.dev
-              openjpeg     openjpeg.dev
-              libxml2      libxml2.dev
-              libbs2b
-              libmysofa    libmysofa.dev
-              twolame
-              opencore-amr
-              zvbi         zvbi.dev
-            ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ];
-          };
+          sharedExtras = mkExtras pkgs.pkgsStatic;
           # Linux-only extras: kernel/Linux-specific or
           # cross-build-blocked-on-darwin features.
           #   - libdrm/kmsgrab: KMS is a Linux kernel ABI
@@ -816,12 +375,6 @@
           linuxOnlyExtras =
             if isLinux then {
               flags = [
-                "--enable-libass"
-                "--enable-libfreetype"
-                "--enable-libharfbuzz"
-                "--enable-libfribidi"
-                "--enable-libfontconfig"
-                "--enable-librsvg"
                 "--enable-libcaca"
                 "--enable-libcdio"
                 "--enable-libdrm"
@@ -831,16 +384,11 @@
                 "--enable-libxcb-shape"
               ];
               inputs = with pkgs.pkgsStatic; [
-                libass    libass.dev
-                freetype  freetype.dev
-                harfbuzz  harfbuzz.dev
-                fribidi   fribidi.dev
-                fontconfig fontconfig.dev
                 libcdio      libcdio.dev
                 libcdio-paranoia
                 libdrm       libdrm.dev
                 xorg.libxcb  xorg.libxcb.dev
-              ] ++ [ librsvgStatic librsvgStatic.dev pkgs.pkgsStatic.libunwind libcacaTerm libcacaTerm.dev ];
+              ] ++ [ libcacaTerm libcacaTerm.dev ];
             } else { flags = [ ]; inputs = [ ]; };
           extras = {
             flags = sharedExtras.flags ++ linuxOnlyExtras.flags;
@@ -855,12 +403,19 @@
         };
 
       # mingw: force pthreads (not w32threads) to match downstream codec
-      # libs (x264, dav1d) that were built against pthreads.
+      # libs (x264, dav1d) that were built against pthreads. Same
+      # `sharedExtras` feature set as linux/darwin — the per-package
+      # `nativeFixes.X` registry handles mingw quirks transparently.
       windowsBuild = pkgs:
-        let cross = ulib.mingwStaticCross pkgs; in
+        let
+          cross = ulib.mingwStaticCross pkgs;
+          extras = mkExtras cross;
+        in
         mkFfmpeg cross {
-          extraConfigureFlags = [ "--disable-w32threads" "--enable-pthreads" ];
-          extraInputs = [ cross.windows.pthreads ];
+          extraConfigureFlags =
+            [ "--disable-w32threads" "--enable-pthreads" ]
+            ++ extras.flags;
+          extraInputs = [ cross.windows.pthreads ] ++ extras.inputs;
         };
     };
 }
