@@ -186,7 +186,7 @@
           quircStatic    = ulib.nativeFixes.quirc          pkgsStaticScope;
           # Feature-disable fixes that the user signed off on (the
           # rationale lives in each fix file). srt/libssh swap crypto
-          # to mbedtls; rtmpdump drops .so + crypto; rubberband drops
+          # to mbedtls; rubberband drops
           # side-target plugins; librist/qrencode skip broken tests;
           # libopenmpt + mpg123 drop CLI audio backends; soxr drops
           # openmp; libbluray renames `dec_init` + (darwin) drops
@@ -194,7 +194,6 @@
           soxrNoOmp       = ulib.nativeFixes.soxr       pkgsStaticScope;
           srtMbed         = ulib.nativeFixes.srt        pkgsStaticScope;
           libsshMbed      = ulib.nativeFixes.libssh     pkgsStaticScope;
-          rtmpdumpStatic  = ulib.nativeFixes.rtmpdump   pkgsStaticScope;
           libristNoTest   = ulib.nativeFixes.librist    pkgsStaticScope;
           qrencodeNoCheck = ulib.nativeFixes.qrencode   pkgsStaticScope;
           rubberbandLean  = ulib.nativeFixes.rubberband pkgsStaticScope;
@@ -224,7 +223,12 @@
             "--enable-libspeex"
             "--enable-libssh"
             "--enable-libbluray"
-            "--enable-librtmp"
+            # No --enable-librtmp on purpose: it conflicts-out ffmpeg's native
+            # rtmp/rtmpe/rtmps protocols (configure: rtmp_protocol_conflict /
+            # ffrtmpcrypt_protocol_conflict = librtmp_protocol). The native impl
+            # does rtmpe:// / rtmps:// / rtmpts:// via the mbedtls we already
+            # enable (rtmpdh.c CONFIG_MBEDTLS), so librtmp would only ADD a dep
+            # and SUBTRACT working crypto. rtmpdump-the-CLI ships separately.
             "--enable-librist"
             "--enable-libqrencode"
             "--enable-libopencore-amrnb"
@@ -257,7 +261,7 @@
             twolame
             opencore-amr
             zvbi         zvbi.dev
-          ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe rtmpdumpStatic rtmpdumpStatic.dev libristNoTest qrencodeNoCheck qrencodeNoCheck.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ]
+          ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtMbed xvidStatic libsshMbed libsshMbed.dev libbluraySafe libristNoTest qrencodeNoCheck qrencodeNoCheck.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ]
             ++ (with pkgsStaticScope; [
               freetype  freetype.dev
               fribidi   fribidi.dev
