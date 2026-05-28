@@ -13,5 +13,5 @@ jobs:
   build:
     permissions:
       contents: write
-    uses: unpins/action-build/.github/workflows/build.yml@v1
+    uses: unpins/action-build/.github/workflows/build.yml@main
     secrets: inherit

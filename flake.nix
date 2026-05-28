@@ -117,7 +117,7 @@
               else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ])
           ++ extraConfigureFlags;
         in
-        stdenv.mkDerivation {
+        stdenv.mkDerivation ({
           pname = "ffmpeg";
           inherit (pkgs.ffmpeg-headless) version src;
 
@@ -165,7 +165,19 @@
           '';
 
           passthru = { pname = "ffmpeg"; inherit (pkgs.ffmpeg-headless) version; };
-        };
+        } // pkgs.lib.optionalAttrs (stdenv.hostPlatform.isRiscV or false) {
+          # riscv64: musl's <bits/syscall.h> predates the riscv_hwprobe
+          # syscall (Linux 6.4), but the cross kernel headers ship
+          # <asm/hwprobe.h>. ffmpeg's libavutil/riscv/cpu.c then includes
+          # the struct and calls syscall(__NR_riscv_hwprobe, ...) with the
+          # number undefined → "'__NR_riscv_hwprobe' undeclared". Define the
+          # canonical riscv value (258) when the libc headers lack it, after
+          # the real include so a newer musl still wins. Keeps
+          # --enable-runtime-cpudetect's V-extension probe working.
+          postPatch = ''
+            sed -i 's|#include <sys/syscall.h>|#include <sys/syscall.h>\n#ifndef __NR_riscv_hwprobe\n#define __NR_riscv_hwprobe 258\n#endif|' libavutil/riscv/cpu.c
+          '';
+        });
       # `mkExtras` returns the cross-platform set of feature flags and
       # build inputs that ride on `sharedExtras`. Parameterised on a
       # `pkgsStatic`-like scope so the same registry of fixes applies
@@ -340,6 +352,17 @@
                 cairo      = ulib.nativeFixes.cairo      prev;
                 dav1d      = ulib.nativeFixes.dav1d      prev;
                 libopus    = ulib.nativeFixes.libopus    prev;
+              });
+            }
+            # riscv64: libjpeg-turbo's RVV SIMD coverage helper fails to
+            # compile (see nix-lib/native-overlay/libjpeg-turbo.nix). Pulled
+            # transitively via librsvg → gdk-pixbuf/libtiff/libwebp plus
+            # openjpeg/libcaca. Gate to riscv so the other arches keep the
+            # unmodified (cache-hit) libjpeg. Same extend rsvg-convert applies.
+            else if origPkgs.stdenv.hostPlatform.isRiscV
+            then origPkgs // {
+              pkgsStatic = origPkgs.pkgsStatic.extend (final: prev: {
+                libjpeg = ulib.nativeFixes."libjpeg-turbo" prev;
               });
             }
             else origPkgs;
