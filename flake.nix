@@ -303,11 +303,18 @@
           #   glib, for the Core Text font backend; same fix.
           # - `cairo`: nixpkgs cross-file generation looks up
           #   `ipc_rmid_deferred_release` by `parsed.kernel.name` against
-          #   { linux, freebsd, openbsd, netbsd } — darwin missing, throws.
+          #   { linux, freebsd, netbsd, windows } — darwin missing, throws.
           #   Bites cross-within-darwin (aarch64-darwin ↔ x86_64-darwin),
           #   the CI path; native x86_64-darwin from Intel Mac doesn't
-          #   trip. Fix replaces mesonFlags with an equivalent cross-file
-          #   that hard-codes 'no'.
+          #   trip. Fix reconstructs mesonFlags with an equivalent
+          #   cross-file that hard-codes 'false' (macOS shmctl IPC_RMID
+          #   forbids subsequent attaches).
+          # - `dav1d`: nixpkgs writes `cpu_family = 'arm64'` into the
+          #   darwin-aarch64 meson cross-file; dav1d reads that as ARM-32
+          #   and assembles `src/arm/32/*.S` with arm64 clang → "vector
+          #   register expected". Patches the cpu_family branches to route
+          #   'arm64' to the 64-bit asm dispatch. Bites the native
+          #   darwin-aarch64 CI runner (the `--enable-libdav1d` dep).
           pkgs =
             if origPkgs.stdenv.hostPlatform.isDarwin
             then origPkgs // {
@@ -317,6 +324,7 @@
                 fontconfig = ulib.nativeFixes.fontconfig prev;
                 pango      = ulib.nativeFixes.pango      prev;
                 cairo      = ulib.nativeFixes.cairo      prev;
+                dav1d      = ulib.nativeFixes.dav1d      prev;
               });
             }
             else origPkgs;
