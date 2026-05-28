@@ -301,6 +301,13 @@
           #   `doCheck` off on darwin. Pulled transitively by cairo.
           # - `pango`: same `add_languages('objc')` cross-file gap as
           #   glib, for the Core Text font backend; same fix.
+          # - `cairo`: nixpkgs cross-file generation looks up
+          #   `ipc_rmid_deferred_release` by `parsed.kernel.name` against
+          #   { linux, freebsd, openbsd, netbsd } — darwin missing, throws.
+          #   Bites cross-within-darwin (aarch64-darwin ↔ x86_64-darwin),
+          #   the CI path; native x86_64-darwin from Intel Mac doesn't
+          #   trip. Fix replaces mesonFlags with an equivalent cross-file
+          #   that hard-codes 'no'.
           pkgs =
             if origPkgs.stdenv.hostPlatform.isDarwin
             then origPkgs // {
@@ -309,6 +316,7 @@
                 graphite2  = ulib.nativeFixes.graphite2  prev;
                 fontconfig = ulib.nativeFixes.fontconfig prev;
                 pango      = ulib.nativeFixes.pango      prev;
+                cairo      = ulib.nativeFixes.cairo      prev;
               });
             }
             else origPkgs;
