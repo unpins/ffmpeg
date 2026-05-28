@@ -134,12 +134,15 @@
           # Also: pkgsBuildHost.perl is non-static (build-time tool) — `pkgs`
           # in cross-darwin-pkgsStatic gives perl-static which fails to build.
           nativeBuildInputs = with pkgs.pkgsBuildHost; [ pkg-config nasm yasm perl ];
+          # libopus + dav1d carry darwin-aarch64 meson `cpu_family =
+          # 'arm64'` fixes; on darwin they come patched from the
+          # pkgsStatic overlay below (so transitive consumers — e.g.
+          # libsndfile → libopus — see the same patched build), vanilla
+          # elsewhere.
           buildInputs = (with pkgs; [
             zlib bzip2 xz libiconv x264 libvorbis libogg lame zimg
-          ]) ++ [
-            (ulib.nativeFixes.libopus pkgs)
-            (ulib.nativeFixes.dav1d pkgs)
-          ] ++ extraInputs;
+            libopus dav1d
+          ]) ++ extraInputs;
 
           strictDeps = true;
           enableParallelBuilding = true;
@@ -315,6 +318,13 @@
           #   register expected". Patches the cpu_family branches to route
           #   'arm64' to the 64-bit asm dispatch. Bites the native
           #   darwin-aarch64 CI runner (the `--enable-libdav1d` dep).
+          # - `libopus`: same `cpu_family = 'arm64'` cross-file mismatch;
+          #   opus's meson.build only matches `['arm', 'aarch64']`, so
+          #   the NEON branch is skipped and it errors at line 617
+          #   ("no intrinsics support for arm64"). Must live in the
+          #   overlay (not just ffmpeg's direct buildInputs) because
+          #   libsndfile → rubberband pull libopus transitively and would
+          #   otherwise get the unpatched build.
           pkgs =
             if origPkgs.stdenv.hostPlatform.isDarwin
             then origPkgs // {
@@ -325,6 +335,7 @@
                 pango      = ulib.nativeFixes.pango      prev;
                 cairo      = ulib.nativeFixes.cairo      prev;
                 dav1d      = ulib.nativeFixes.dav1d      prev;
+                libopus    = ulib.nativeFixes.libopus    prev;
               });
             }
             else origPkgs;
