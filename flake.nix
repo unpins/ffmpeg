@@ -72,7 +72,31 @@
           # reinterprets `--enable-static --disable-shared` as
           # LDFLAGS=-static internally (same trap that hit htop / tmux),
           # so omit those too on darwin.
-          ++ (if isDarwin then [ ]
+          #
+          # The C++ codec deps drag in libc++ two ways, both of which
+          # default to the dynamic /usr/lib/libc++.1.dylib that the
+          # portability allowlist rejects (libc++ must be folded in
+          # statically):
+          #   - dep `.pc` `Libs.private` under `--pkg-config-flags=--static`
+          #     (libgme `-lstdc++`, chromaprint `-lc++`, …);
+          #   - ffmpeg's own hardcoded `-lstdc++` in the libgme/libopenmpt/
+          #     librubberband/libsnappy `require` probes.
+          # We can't suppress those tokens (they come from many sources and
+          # also gate configure's lib-detection link tests), so instead we
+          # make them *resolve static*: configurePhase drops a `-L` shim
+          # exposing libc++.a as both `libc++.a` and `libstdc++.a` (and
+          # `libc++abi.a`) ahead of the dylib dirs, and we pass
+          # `-Wl,-search_paths_first` on the final link so ld64 takes the
+          # `.a` from the shim dir instead of falling back to its default
+          # `-search_dylibs_first` (which finds libc++.1.dylib first). That
+          # makes every `-lc++`/`-lstdc++`/`-lc++abi` link static. ffmpeg
+          # links via the C driver, so there's no implicit `-lc++` to worry
+          # about. See docs/dynamic-link-policy.md. (libSystem stays
+          # implicit-dynamic.)
+          ++ (if isDarwin then [
+                "--extra-ldflags=-Wl,-search_paths_first"
+                "--extra-libs=-lc++abi"
+              ]
               else if isMinGW then [
                 # mingw single-binary policy: fold the toolchain runtime
                 # (libgcc, libstdc++, libwinpthread, libmcfgthread) into
@@ -150,6 +174,17 @@
 
           configurePhase = ''
             runHook preConfigure
+            ${pkgs.lib.optionalString isDarwin ''
+              # See the darwin `--extra-libs` note above. Expose the static
+              # libc++ as libc++.a + libstdc++.a (+ libc++abi.a) on a search
+              # path that precedes the dylib dirs, so every -lc++/-lstdc++
+              # from ffmpeg's configure and the dep `.pc` files links static.
+              mkdir -p "$TMPDIR/cxx-static"
+              ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
+              ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
+              ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
+              export NIX_LDFLAGS="-L$TMPDIR/cxx-static $NIX_LDFLAGS"
+            ''}
             # ffmpeg's `require_cpp_condition` for x264 trips on the
             # default x264.h header decoration; drop the check.
             sed -i '/X264_API_IMPORTS/d' configure
