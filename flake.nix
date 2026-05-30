@@ -12,6 +12,53 @@
     let
       ulib = unpins-lib.lib;
 
+      # Man pages we actually ship: the two CLI tools (ffmpeg/ffprobe) plus
+      # the component reference manuals. Deliberately EXCLUDES ffplay.1 /
+      # ffplay-all.1 (we --disable-ffplay) and libav*.3 (library API docs that
+      # need doxygen; we ship the CLI binaries, not the libraries). Built once
+      # on x86_64-linux (man is OS-independent roff) and embedded byte-identical
+      # on every platform — native installs from `ffmpegMan`, the windows .exe
+      # gets it via mkStandaloneFlake's `winManRoot`. Without this, the windows
+      # graft would pull nixpkgs' FULL 22-page set (ffplay + libav*) while
+      # native shipped only 2 — this gives true cross-platform man parity.
+      usefulMan = [
+        "ffmpeg" "ffmpeg-all" "ffprobe" "ffprobe-all"
+        "ffmpeg-utils" "ffmpeg-scaler" "ffmpeg-resampler"
+        "ffmpeg-codecs" "ffmpeg-bitstream-filters" "ffmpeg-formats"
+        "ffmpeg-protocols" "ffmpeg-devices" "ffmpeg-filters"
+      ];
+      # Standalone man derivation. ffmpeg's man pages generate from doc/*.texi
+      # via texi2pod.pl + pod2man (perl) with no target execution, so a
+      # feature-light configure is enough — we never compile the codec chain
+      # here, only `make` the .1 targets.
+      ffmpegMan =
+        let p = unpins-lib.inputs.nixpkgs.legacyPackages.x86_64-linux;
+        in p.stdenv.mkDerivation {
+          pname = "ffmpeg-man";
+          inherit (p.ffmpeg-headless) version src;
+          nativeBuildInputs = [ p.perl ];
+          enableParallelBuilding = true;
+          configurePhase = ''
+            runHook preConfigure
+            ./configure --cc=cc --disable-x86asm \
+              --disable-htmlpages --disable-podpages --disable-txtpages
+            runHook postConfigure
+          '';
+          buildPhase = ''
+            runHook preBuild
+            make -j''${NIX_BUILD_CORES:-1} \
+              ${builtins.concatStringsSep " " (map (m: "doc/${m}.1") usefulMan)}
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/share/man/man1
+            cp ${builtins.concatStringsSep " " (map (m: "doc/${m}.1") usefulMan)} \
+              $out/share/man/man1/
+            runHook postInstall
+          '';
+        };
+
       # nixpkgs's pkgsStatic.ffmpeg-headless pulls openapv/ocl-icd/
       # libtiff/libsndfile etc — codec deps that break under pkgsStatic.
       # We ship only the codecs we want and run configure ourselves.
@@ -54,8 +101,11 @@
             # actually ships. Don't pass `--pkg-config=pkg-config`
             # or it looks for a bare `pkg-config` that isn't in PATH.
             "--pkg-config-flags=--static"
-            "--disable-doc" "--disable-htmlpages" "--disable-manpages"
-            "--disable-podpages" "--disable-txtpages"
+            # No docs in the main build: man pages come from the standalone
+            # `ffmpegMan` derivation (installed below, and embedded on windows
+            # via mkStandaloneFlake's winManRoot) so the set is byte-identical
+            # on every platform. Saves the texi2pod/pod2man pass here too.
+            "--disable-doc"
             "--disable-debug" "--disable-stripping"
             "--enable-gpl" "--enable-version3"
             "--enable-runtime-cpudetect" "--enable-network"
@@ -194,8 +244,12 @@
 
           installPhase = ''
             runHook preInstall
-            mkdir -p $out/bin
+            mkdir -p $out/bin $out/share
             cp ffmpeg${exe} ffprobe${exe} $out/bin/
+            # Man parity: install the curated set from `ffmpegMan` (identical on
+            # every platform). On native/darwin withMan harvests $out/share/man
+            # directly; on windows nix-lib reads the same drv via winManRoot.
+            cp -r ${ffmpegMan}/share/man $out/share/
             runHook postInstall
           '';
 
@@ -247,7 +301,9 @@
           libbluraySafe   = ulib.nativeFixes.libbluray  pkgsStaticScope;
           libopenmptLean  = ulib.nativeFixes.libopenmpt pkgsStaticScope;
           chromaprintLean = ulib.nativeFixes.chromaprint pkgsStaticScope;
-          fftwPkg         = ulib.nativeFixes.fftw       pkgsStaticScope;
+          # fftw (pulled transitively by rubberband/speex/speexdsp) is fixed
+          # via the pkgsStatic overlay in `build` below, not as a direct
+          # input — ffmpeg has no fftw feature of its own.
           vidStabPkg      = ulib.nativeFixes.vid-stab   pkgsStaticScope;
           speexdspPkg     = ulib.nativeFixes.speexdsp   pkgsStaticScope;
           speexPkg        = ulib.nativeFixes.speex      pkgsStaticScope;
@@ -330,6 +386,17 @@
       inherit self;
       name = "ffmpeg";
 
+      # The mingw cross can't build man, so by default mkStandaloneFlake grafts
+      # nixpkgs' FULL ffmpeg man (ffplay.1 + libav*.3 we don't ship). Point it
+      # at our curated `ffmpegMan` so the windows .exe embeds exactly the same
+      # 13 pages native/darwin do.
+      winManRoot = ffmpegMan;
+
+      # Execute the built binary in CI (esp. windows-x86_64, which only
+      # runs here). `-version` prints the banner + full configure line.
+      smoke = [ "-version" ];
+      smokePattern = "ffmpeg version";
+
       # darwin's libSystem doesn't ship libpthread.a so --enable-pthreads
       # breaks the configure probe; linux is fine.
       build = origPkgs:
@@ -376,10 +443,24 @@
           #   overlay (not just ffmpeg's direct buildInputs) because
           #   libsndfile → rubberband pull libopus transitively and would
           #   otherwise get the unpatched build.
-          pkgs =
-            if origPkgs.stdenv.hostPlatform.isDarwin
-            then origPkgs // {
-              pkgsStatic = origPkgs.pkgsStatic.extend (final: prev: {
+          # - `fftw`: nixpkgs drags `gfortran-wrapper` into fftw's
+          #   nativeBuildInputs on EVERY platform although fftw never
+          #   enables Fortran, forcing a full cross-GCC build (~30-60 min,
+          #   not on cache.nixos.org; a hard failure on darwin). The nix-lib
+          #   fix strips it (output-neutral). Apply as an overlay so the
+          #   transitive consumers — rubberband (double), speex/speexdsp
+          #   (single) — rebuild against the gfortran-free fftw instead of
+          #   each dragging cross-gfortran. ffmpeg has no fftw feature of
+          #   its own; it's purely transitive. The fix targets `pkgs.fftw`,
+          #   so feed it `fftwFloat` via an attr-swap to reuse the same
+          #   logic (incl. the darwin openmp side-step) for single precision.
+          pkgs = origPkgs // {
+            pkgsStatic = origPkgs.pkgsStatic.extend (final: prev:
+              {
+                fftw      = ulib.nativeFixes.fftw prev;
+                fftwFloat = ulib.nativeFixes.fftw (prev // { fftw = prev.fftwFloat; });
+              }
+              // (if origPkgs.stdenv.hostPlatform.isDarwin then {
                 glib       = ulib.nativeFixes.glib       prev;
                 graphite2  = ulib.nativeFixes.graphite2  prev;
                 fontconfig = ulib.nativeFixes.fontconfig prev;
@@ -387,20 +468,17 @@
                 cairo      = ulib.nativeFixes.cairo      prev;
                 dav1d      = ulib.nativeFixes.dav1d      prev;
                 libopus    = ulib.nativeFixes.libopus    prev;
-              });
-            }
-            # riscv64: libjpeg-turbo's RVV SIMD coverage helper fails to
-            # compile (see nix-lib/native-overlay/libjpeg-turbo.nix). Pulled
-            # transitively via librsvg → gdk-pixbuf/libtiff/libwebp plus
-            # openjpeg/libcaca. Gate to riscv so the other arches keep the
-            # unmodified (cache-hit) libjpeg. Same extend rsvg-convert applies.
-            else if origPkgs.stdenv.hostPlatform.isRiscV
-            then origPkgs // {
-              pkgsStatic = origPkgs.pkgsStatic.extend (final: prev: {
+              } else { })
+              # riscv64: libjpeg-turbo's RVV SIMD coverage helper fails to
+              # compile (see nix-lib/native-overlay/libjpeg-turbo.nix). Pulled
+              # transitively via librsvg → gdk-pixbuf/libtiff/libwebp plus
+              # openjpeg/libcaca. Gate to riscv so the other arches keep the
+              # unmodified (cache-hit) libjpeg.
+              // (if origPkgs.stdenv.hostPlatform.isRiscV then {
                 libjpeg = ulib.nativeFixes."libjpeg-turbo" prev;
-              });
-            }
-            else origPkgs;
+              } else { })
+            );
+          };
           isDarwin = pkgs.stdenv.isDarwin;
           isLinux = pkgs.stdenv.hostPlatform.isLinux;
           # nixpkgs `pkgsStatic.libcaca` puxa `imlib2 (x11Support=true)` +

@@ -60,7 +60,7 @@ The [Releases](https://github.com/unpins/ffmpeg/releases) page has standalone bi
 - **Containers / compression** — zlib, bzip2, lzma, iconv
 - **Subtitles / fonts** — libass + freetype + harfbuzz + fribidi + fontconfig
 - **Manifests** — libxml2 (DASH / HLS)
-- **Streaming protocols** — SRT (libsrt), SFTP (libssh), RTMP (librtmp, plaintext only — `rtmps://` via ffmpeg-internal mbedtls), RIST (librist)
+- **Streaming protocols** — SRT (libsrt), SFTP (libssh), RTMP (ffmpeg-native, incl. `rtmpe://` / `rtmps://` / `rtmpts://` over mbedtls — no librtmp), RIST (librist)
 - **Discs** — libbluray
 - **Filters** — libqrencode (QR overlay / source), libquirc (QR decoder), libvidstab (video stabilization)
 - **Demuxers** — libgme (NES / SNES / Genesis / GameBoy / MSX chiptune)
@@ -80,20 +80,28 @@ Features that depend on a Linux-specific kernel ABI or socket — physically not
 
 ### Crypto backend
 
-mbedtls everywhere — both for ffmpeg's own `--enable-mbedtls` (HTTPS / TLS in HTTP / RTMPS / HLS) and as the static crypto backend for libsrt and libssh. OpenSSL is intentionally excluded: it would pull the full provider stack (legacy + ML-DSA / SLH-DSA post-quantum) for a few SHA / AES symbols. Net effect on the Linux build: ~5 MB smaller, identical user-facing features.
+mbedtls everywhere — ffmpeg's own TLS (`--enable-mbedtls`) and the static crypto backend for libsrt + libssh. OpenSSL is excluded: it drags the full provider stack for a few SHA/AES symbols (~5 MB on Linux, same features).
 
 ### Single binary, no companion DLLs
 
-Per the project [dynamic-link-policy](https://github.com/unpins/docs/blob/main/dynamic-link-policy.md), each platform ships exactly one executable (plus `ffprobe`). On Windows this means the GCC runtime (libgcc, libstdc++, libwinpthread, libmcfgthread) is folded into the `.exe` via `-static -static-libgcc -static-libstdc++` plus a pkg-config `Libs.private` rewrite in `nix-lib/mingw-overlay/x265.nix` (x265's CMake probe otherwise embeds a dynamic-libgcc link sequence that every `pkg-config --static` consumer would re-inject). The `--allow-multiple-definition` extra-ldflag is the canonical workaround for `compiler_builtins` colliding between librsvg's Rust staticlib and ffmpeg's own libgcc.
+Each platform ships one executable (plus `ffprobe`), per the [dynamic-link-policy](https://github.com/unpins/docs/blob/main/dynamic-link-policy.md). On Windows the GCC runtime (libgcc, libstdc++, libwinpthread, libmcfgthread) is folded into the `.exe`. See `flake.nix` and `nix-lib/mingw-overlay/x265.nix` for the link mechanics.
+
+### Man pages
+
+13 man pages are embedded in the binary — read with `unpin man ffmpeg` (or `ffprobe`, `ffmpeg-filters`, `ffmpeg-codecs`, …). The set is the two CLI tools plus the component reference manuals (`ffmpeg-utils`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`, `ffmpeg-bitstream-filters`, `ffmpeg-scaler`, `ffmpeg-resampler`, and the `-all` variants). `ffplay.1` and the `libav*.3` library docs are excluded — we ship the CLI binaries, not ffplay or the libraries. The exact same set is embedded byte-for-byte on Linux, macOS, and Windows.
 
 ### Excluded features
 
-- **ffplay** — needs SDL2 + a software renderer + audio backend chain; cross-platform static SDL2 isn't part of this build. Tracked as a learning exercise alongside `mpv`.
-- **Hardware acceleration** (vaapi, vdpau, nvenc, videotoolbox, vulkan hwaccel) — every backend `dlopen`s a vendor driver at runtime; musl-static can't load glibc-built `.so`s, and Windows / macOS pull the same wall. Unblock requires the planned `libdl-interceptor v2` infrastructure.
+- **ffplay** — needs the SDL2 renderer/audio chain; static cross-platform SDL2 isn't in this build. Tracked alongside `mpv`.
+- **Hardware acceleration** (vaapi, vdpau, nvenc, videotoolbox, vulkan) — each `dlopen`s a vendor driver; musl-static can't load glibc `.so`s, and Windows/macOS hit the same wall. Needs the planned `libdl-interceptor v2`.
 - **OpenSSL backends** — see Crypto backend above.
-- **libsmbclient, libjxl, libgsm, openh264, libxavs2, libdavs2** — deferred, not yet ported to `pkgsStatic` / `pkgsCross` cleanly.
-- **GUI / X11 desktop features on macOS and Windows** — kmsgrab / x11grab / libcaca / libcdio are physically Linux-only (see above).
+- **libsmbclient, libjxl, libgsm, openh264, libxavs2, libdavs2** — deferred, not yet clean under `pkgsStatic`/`pkgsCross`.
+- **kmsgrab / x11grab / libcaca / libcdio on macOS + Windows** — physically Linux-only (see Linux-only above).
 
 ### Codec set selection
 
-`pkgsStatic.ffmpeg-headless` from nixpkgs is not reused — it pulls openapv / ocl-icd / libtiff / libsndfile, codec deps that break under `pkgsStatic`. This flake ships only the codecs it wants and runs `./configure` itself; see `flake.nix` and `nix-lib/native-overlay/*.nix` for per-dependency rationale.
+nixpkgs' `pkgsStatic.ffmpeg-headless` is not reused (it pulls openapv / ocl-icd / libtiff / libsndfile, which break under `pkgsStatic`). This flake configures its own codec set; see `flake.nix` and `nix-lib/native-overlay/*.nix`.
+
+### Tests
+
+No suite runs: FFmpeg's FATE needs gigabytes of sample media + network. CI instead smoke-runs `ffmpeg -version` on every target (incl. the Windows `.exe`).
