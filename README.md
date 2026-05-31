@@ -88,7 +88,7 @@ Each platform ships one executable (plus `ffprobe`), per the [dynamic-link-polic
 
 ### Man pages
 
-13 man pages are embedded in the binary — read with `unpin man ffmpeg` (or `ffprobe`, `ffmpeg-filters`, `ffmpeg-codecs`, …). The set is the two CLI tools plus the component reference manuals (`ffmpeg-utils`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`, `ffmpeg-bitstream-filters`, `ffmpeg-scaler`, `ffmpeg-resampler`, and the `-all` variants). `ffplay.1` and the `libav*.3` library docs are excluded — we ship the CLI binaries, not ffplay or the libraries. The exact same set is embedded byte-for-byte on Linux, macOS, and Windows.
+13 man pages are embedded in the binary — read with `unpin man ffmpeg` (or `ffprobe`, `ffmpeg-filters`, `ffmpeg-codecs`, …). The set is the two CLI tools plus the component reference manuals (`ffmpeg-utils`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`, `ffmpeg-bitstream-filters`, `ffmpeg-scaler`, `ffmpeg-resampler`, and the `-all` variants). `ffplay.1` and the `libav*.3` library docs are excluded — we ship the CLI binaries, not ffplay or the libraries.
 
 ### Excluded features
 
