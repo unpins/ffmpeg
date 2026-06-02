@@ -15,49 +15,18 @@
       # Man pages we actually ship: the two CLI tools (ffmpeg/ffprobe) plus
       # the component reference manuals. Deliberately EXCLUDES ffplay.1 /
       # ffplay-all.1 (we --disable-ffplay) and libav*.3 (library API docs that
-      # need doxygen; we ship the CLI binaries, not the libraries). Each native
-      # build generates this set in-place (per arch — see the configure note);
-      # `ffmpegMan` below rebuilds the SAME set on x86_64-linux purely to feed
-      # the windows mingw `.exe` via mkStandaloneFlake's `winManRoot`. Without
-      # the curation the windows graft would pull nixpkgs' FULL set (ffplay +
-      # libav*); man is reproducible roff, so all platforms stay byte-identical.
+      # need doxygen; we ship the CLI binaries, not the libraries). EVERY build
+      # — native, cross-linux, AND the mingw windows .exe — generates this set
+      # in-place in its installPhase (texi2pod.pl + pod2man run on the build
+      # host, no target execution) and installs it to $out/share/man, so each
+      # binary harvests its OWN man via withMan. man is reproducible roff, so
+      # all platforms stay byte-identical. No graft, no separate man derivation.
       usefulMan = [
         "ffmpeg" "ffmpeg-all" "ffprobe" "ffprobe-all"
         "ffmpeg-utils" "ffmpeg-scaler" "ffmpeg-resampler"
         "ffmpeg-codecs" "ffmpeg-bitstream-filters" "ffmpeg-formats"
         "ffmpeg-protocols" "ffmpeg-devices" "ffmpeg-filters"
       ];
-      # Standalone man derivation. ffmpeg's man pages generate from doc/*.texi
-      # via texi2pod.pl + pod2man (perl) with no target execution, so a
-      # feature-light configure is enough — we never compile the codec chain
-      # here, only `make` the .1 targets.
-      ffmpegMan =
-        let p = unpins-lib.inputs.nixpkgs.legacyPackages.x86_64-linux;
-        in p.stdenv.mkDerivation {
-          pname = "ffmpeg-man";
-          inherit (p.ffmpeg-headless) version src;
-          nativeBuildInputs = [ p.perl ];
-          enableParallelBuilding = true;
-          configurePhase = ''
-            runHook preConfigure
-            ./configure --cc=cc --disable-x86asm \
-              --disable-htmlpages --disable-podpages --disable-txtpages
-            runHook postConfigure
-          '';
-          buildPhase = ''
-            runHook preBuild
-            make -j''${NIX_BUILD_CORES:-1} \
-              ${builtins.concatStringsSep " " (map (m: "doc/${m}.1") usefulMan)}
-            runHook postBuild
-          '';
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/share/man/man1
-            cp ${builtins.concatStringsSep " " (map (m: "doc/${m}.1") usefulMan)} \
-              $out/share/man/man1/
-            runHook postInstall
-          '';
-        };
 
       # nixpkgs's pkgsStatic.ffmpeg-headless pulls openapv/ocl-icd/
       # libtiff/libsndfile etc — codec deps that break under pkgsStatic.
@@ -392,11 +361,10 @@
       inherit self;
       name = "ffmpeg";
 
-      # The mingw cross can't build man, so by default mkStandaloneFlake grafts
-      # nixpkgs' FULL ffmpeg man (ffplay.1 + libav*.3 we don't ship). Point it
-      # at our curated `ffmpegMan` so the windows .exe embeds exactly the same
-      # 13 pages native/darwin do.
-      winManRoot = ffmpegMan;
+      # No winManRoot: the mingw windows .exe builds + installs the same 13
+      # curated man pages as native (the installPhase `make`s doc/*.1 via
+      # build-host perl on every target), so it harvests its OWN man — exactly
+      # the pages native/darwin embed, no nixpkgs graft.
 
       # Execute the built binary in CI (esp. windows-x86_64, which only
       # runs here). `-version` prints the banner + full configure line.
