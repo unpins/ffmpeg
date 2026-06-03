@@ -9,21 +9,30 @@ Standalone build of [FFmpeg](https://ffmpeg.org/) — headless, no GUI player.
 
 Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
 
-Ships two CLI tools: `ffmpeg` (transcoder) and `ffprobe` (inspector). `ffplay` is intentionally omitted — see [Excluded features](#excluded-features) below.
+Ships `ffmpeg` and `ffprobe`. `ffplay` is intentionally omitted — see [Excluded features](#excluded-features) below.
 
-## Installation
+## Usage
 
-Install with [unpin](https://github.com/unpins/unpin):
-
-```bash
-unpin ffmpeg
-```
-
-Or run without installing:
+Run the `ffmpeg` program with [unpin](https://github.com/unpins/unpin):
 
 ```bash
-unpin run ffmpeg
+unpin ffmpeg -i input.mp4 output.mkv
 ```
+
+To install the programs onto your PATH:
+
+```bash
+unpin install ffmpeg
+```
+
+`unpin install ffmpeg` creates the `ffmpeg` and `ffprobe` commands.
+
+## Programs
+
+| command   | what it does                                       |
+| --------- | -------------------------------------------------- |
+| `ffmpeg`  | transcode and process audio / video                |
+| `ffprobe` | inspect a media file's streams, format and metadata |
 
 ## Build locally
 
@@ -88,7 +97,7 @@ Each platform ships one executable (plus `ffprobe`), per the [dynamic-link-polic
 
 ### Man pages
 
-13 man pages are embedded in the binary — read with `unpin man ffmpeg` (or `ffprobe`, `ffmpeg-filters`, `ffmpeg-codecs`, …). The set is the two CLI tools plus the component reference manuals (`ffmpeg-utils`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`, `ffmpeg-bitstream-filters`, `ffmpeg-scaler`, `ffmpeg-resampler`, and the `-all` variants). `ffplay.1` and the `libav*.3` library docs are excluded — we ship the CLI binaries, not ffplay or the libraries.
+13 man pages are embedded in the binary — read with `unpin man ffmpeg` (or `ffprobe`, `ffmpeg-filters`, `ffmpeg-codecs`, …). The set is the two programs plus the component reference manuals (`ffmpeg-utils`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`, `ffmpeg-bitstream-filters`, `ffmpeg-scaler`, `ffmpeg-resampler`, and the `-all` variants). `ffplay.1` and the `libav*.3` library docs are excluded — we ship the CLI binaries, not ffplay or the libraries.
 
 ### Excluded features
 
