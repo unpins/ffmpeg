@@ -47,11 +47,17 @@
           flags = [
             "--prefix=$out"
             "--cross-prefix=${stdenv.hostPlatform.config}-"
-            # ffmpeg's cc_default="gcc" — appended after cross-prefix
-            # this gives `arm64-apple-darwin-gcc`, which doesn't exist
-            # on darwin (clang backend). Force the wrapper symlink that
-            # exists across both clang and gcc nixpkgs cc-wrappers.
+            # ffmpeg's cc_default="gcc" / cxx_default="g++" — appended
+            # after cross-prefix this gives `arm64-apple-darwin-gcc` /
+            # `…-g++`, neither of which exists on darwin (clang backend).
+            # nixos-26.05's clang-21 cc-wrapper for the prefixed darwin
+            # toolchain dropped the `-g++` alias too, so the final
+            # LDXX link of ffmpeg_g/ffprobe_g died with
+            # `x86_64-apple-darwin-g++: command not found`. Force the
+            # `-cc`/`-c++` wrapper symlinks, which exist across both the
+            # clang and gcc nixpkgs cc-wrappers on every target.
             "--cc=${stdenv.hostPlatform.config}-cc"
+            "--cxx=${stdenv.hostPlatform.config}-c++"
             "--host-cc=${pkgs.buildPackages.stdenv.cc}/bin/cc"
             # Hard-reference the cross pkg-config wrapper. Splicing in
             # nativeBuildInputs picks the BUILD-platform wrapper (named
