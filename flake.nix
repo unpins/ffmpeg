@@ -366,6 +366,10 @@
     ulib.mkStandaloneFlake {
       inherit self;
       name = "ffmpeg";
+      # Built with --enable-gpl --enable-version3; nixpkgs' ffmpeg meta tracks
+      # its own withGPL arg, not our configure flags, so set the effective
+      # license explicitly. (Custom build → no upstream meta.license to carry.)
+      license = "GPL-3.0-or-later";
 
       # No winManRoot: the mingw windows .exe builds + installs the same 13
       # curated man pages as native (the installPhase `make`s doc/*.1 via
