@@ -370,6 +370,8 @@
       # its own withGPL arg, not our configure flags, so set the effective
       # license explicitly. (Custom build → no upstream meta.license to carry.)
       license = "GPL-3.0-or-later";
+      # Custom mkDerivation → no upstream meta.description to carry either.
+      description = "Record, convert and stream audio and video (ffmpeg + ffprobe)";
 
       # No winManRoot: the mingw windows .exe builds + installs the same 13
       # curated man pages as native (the installPhase `make`s doc/*.1 via
