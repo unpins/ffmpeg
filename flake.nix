@@ -1,5 +1,5 @@
 {
-  description = "Standalone build of ffmpeg (headless)";
+  description = "FFmpeg (headless) as a single self-contained binary";
 
   nixConfig = {
     extra-substituters = [ "https://unpins.cachix.org" ];
