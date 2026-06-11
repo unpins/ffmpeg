@@ -365,6 +365,7 @@
     in
     ulib.mkStandaloneFlake {
       inherit self;
+      dnsFallback = true; # resolves hostnames; opt into the Android DNS fallback
       name = "ffmpeg";
       # Built with --enable-gpl --enable-version3; nixpkgs' ffmpeg meta tracks
       # its own withGPL arg, not our configure flags, so set the effective
