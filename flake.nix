@@ -39,6 +39,8 @@
           stdenv = pkgs.stdenv;
           isMinGW = stdenv.hostPlatform.isMinGW or false;
           isDarwin = stdenv.hostPlatform.isDarwin;
+          # unpin-llvm engine active on this scope (linux + darwin, not mingw).
+          isEngine = pkgs.lib.hasInfix "unpin-cc" (stdenv.cc.name or "");
           targetOs =
             if isMinGW then "mingw64"
             else if isDarwin then "darwin"
@@ -123,6 +125,9 @@
           # implicit-dynamic.)
           ++ (if isDarwin then [
                 "--extra-ldflags=-Wl,-search_paths_first"
+                # See the linux `-lstdc++` note below: srt.pc (and other C++ deps
+                # found via require_pkg_config) omit the C++ runtime, so force it.
+                "--extra-libs=-lstdc++"
                 "--extra-libs=-lc++abi"
               ]
               else if isMinGW then [
@@ -166,12 +171,80 @@
                 "--extra-ldflags=-static-libstdc++"
                 "--extra-ldflags=-Wl,--allow-multiple-definition"
               ]
-              else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ])
+              else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ]
+                # Engine linux: force the whole static C++ runtime onto every link.
+                # C++ codec deps split two ways: some ffmpeg detects with a
+                # hardcoded `-lstdc++` (libgme…), but others (srt) come via
+                # `require_pkg_config` and their `.pc` omits the C++ runtime
+                # entirely (srt.pc: `Libs.private: -lmbedtls …`, no `-lstdc++`), so
+                # every `std::__1::…` from srt.a is undefined. Append `-lstdc++`
+                # (→ libc++.a via the cxx-static shim) plus its `__cxa_*`/typeinfo
+                # (libc++abi) and `_Unwind_*` (LLVM libunwind), in dependency order.
+                # On a C-only dep's link these static archives simply aren't pulled.
+                ++ pkgs.lib.optionals isEngine [
+                  "--extra-libs=-lstdc++"
+                  "--extra-libs=-lc++abi"
+                  "--extra-libs=-lunwind"
+                ]
+                # armv7l only: the sysroot's `libunwind.a` is NATIVE while every
+                # dep and musl itself are bitcode. On ARM, LTO codegen emits the
+                # EHABI `_Unwind_Resume` calls that any cleanup needs, so nothing
+                # references libunwind until AFTER the LTO step — and a member
+                # pulled that late brings undefined `fprintf`/`snprintf`/`stderr`/
+                # `abort`/`__assert_fail` that the bitcode libc can no longer
+                # satisfy, LTO having already chosen its members. (`-lc` appended
+                # afterwards does not help, for the same reason.) It surfaces as a
+                # bogus `fontconfig not found using pkg-config` — fontconfig is
+                # simply the first configure probe with enough bitcode behind it to
+                # emit a cleanup. Forcing the symbol undefined from the start pulls
+                # libunwind in the pre-LTO archive pass instead, so its libc needs
+                # are visible while LTO still has the whole bitcode libc to draw
+                # from. Same class as the i686 `-Wl,-u,malloc` in the musl-bitcode
+                # work; one symbol is enough because the rest ride in with it.
+                ++ pkgs.lib.optional
+                  (isEngine && pkgs.stdenv.hostPlatform.isAarch32)
+                  "--extra-ldflags=-Wl,-u,_Unwind_Resume")
           ++ extraConfigureFlags;
         in
         stdenv.mkDerivation ({
           pname = "ffmpeg";
           inherit (pkgs.ffmpeg-headless) version src;
+
+          # engine: make ffmpeg's inline-asm probes ASSEMBLE.
+          #
+          # `check_inline_asm` decides whether an instruction can be used
+          # UNCONDITIONALLY (ffmpeg's own words) by compiling
+          # `__asm__ volatile("<insn>")` with $CC -c. Under the engine every
+          # compile carries `-flto`, so the object is bitcode and the asm text is
+          # merely carried along — nothing assembles, every probe passes. On
+          # armv7l that turns HAVE_NEON_INLINE on for a target whose baseline is
+          # vfpv3-d16, and the NEON in libavcodec/arm/aac.h (used with no runtime
+          # check) only blows up at the LTO link, where the assembler finally runs:
+          # `ld-temp.o <inline asm>: vmul.f32 d0, d0, d1 — instruction requires:
+          # NEON`. The engine cc already drops `-flto` from anything that looks
+          # like a probe, but it recognises them by autoconf's `conftest` filename
+          # and ffmpeg names its own `ffconf.*`; the marker define opts these
+          # probes into that same escape hatch. Only `_inline` detection changes —
+          # `check_as`/`neon_external` already assemble for real, so the runtime-
+          # detected NEON in the .S files stays.
+          postPatch =
+            pkgs.lib.optionalString isEngine ''
+              substituteInPlace configure \
+                --replace-fail 'test_cc "$@" <<EOF && enable $name' \
+                               'test_cc -DUNPIN_conftest=1 "$@" <<EOF && enable $name'
+            ''
+            # riscv64: musl's <bits/syscall.h> predates the riscv_hwprobe syscall
+            # (Linux 6.4), but the cross kernel headers ship <asm/hwprobe.h>.
+            # ffmpeg's libavutil/riscv/cpu.c then includes the struct and calls
+            # syscall(__NR_riscv_hwprobe, ...) with the number undefined →
+            # "'__NR_riscv_hwprobe' undeclared". Define the canonical riscv value
+            # (258) when the libc headers lack it, after the real include so a
+            # newer musl still wins. Keeps --enable-runtime-cpudetect's
+            # V-extension probe working.
+            + pkgs.lib.optionalString (stdenv.hostPlatform.isRiscV or false) ''
+              sed -i 's|#include <sys/syscall.h>|#include <sys/syscall.h>\n#ifndef __NR_riscv_hwprobe\n#define __NR_riscv_hwprobe 258\n#endif|' libavutil/riscv/cpu.c
+            ''
+            ;
 
           # pkgsBuildHost is the canonical "build tools that target host"
           # scope:
@@ -200,23 +273,72 @@
           enableParallelBuilding = true;
           stripAllList = [ "bin" ];
 
+          # ffmpeg links each program as `<prog>_g` (its debug binary) then
+          # copies it to `<prog>`. The engine's link-capture sidecar is keyed by
+          # the LINKED output name, so it lands as `<prog>_g.link`, but the
+          # multicall module hook (appended to this postBuild) reads `<prog>.link`
+          # → `no link sidecar for ffmpeg`. Alias the sidecars to the program
+          # names. Engine-only (`$UNPIN_LINK_DIR` is unset off-engine).
+          postBuild = pkgs.lib.optionalString isEngine ''
+            for p in ffmpeg ffprobe; do
+              [ -f "$UNPIN_LINK_DIR/''${p}_g.link" ] \
+                && cp "$UNPIN_LINK_DIR/''${p}_g.link" "$UNPIN_LINK_DIR/$p.link" || true
+            done
+          '';
+
           configurePhase = ''
             runHook preConfigure
-            ${pkgs.lib.optionalString isDarwin ''
-              # See the darwin `--extra-libs` note above. Expose the static
-              # libc++ as libc++.a + libstdc++.a (+ libc++abi.a) on a search
-              # path that precedes the dylib dirs, so every -lc++/-lstdc++
-              # from ffmpeg's configure and the dep `.pc` files links static.
+            ${pkgs.lib.optionalString isEngine ''
+              # The engine's C++ runtime is libc++, but ffmpeg's configure probes
+              # (libgme/libopenmpt/librubberband/libsnappy `require`) and several
+              # dep `.pc` `Libs.private` hardcode `-lstdc++` (and `-lc++`/
+              # `-lc++abi`). With no `libstdc++.a` on the search path the libgme
+              # probe fails → `ERROR: libgme not found`. Expose the static libc++
+              # under all three names ahead of the default dirs so every such
+              # token links the engine's static libc++.
               mkdir -p "$TMPDIR/cxx-static"
-              ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
-              ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
-              ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
+              ${if isDarwin then ''
+                # darwin: the Itanium unwinder is in libSystem, so libc++/libc++abi
+                # suffice. ld64 also needs `-Wl,-search_paths_first` (added above)
+                # to prefer the `.a` over /usr/lib/libc++.1.dylib.
+                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
+                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
+                ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
+              '' else ''
+                # linux: use the COMPLETE upstream static libc++/libc++abi from
+                # nixpkgs (the engine sysroot's on-demand `cxx/lib/libc++.a` is a
+                # re-archived subset — enough for libgme but missing the locale/
+                # iostream/random_device members srt's C++ pulls). Their `_Unwind_*`
+                # unwinder, though, lives ONLY in LLVM libunwind: nixpkgs `libunwind`
+                # is nongnu (lacks them) and `llvmPackages.libunwind` is an empty
+                # stub, so take libunwind.a from the sysroot `cxx/lib` (the exact one
+                # clang++ links), seeded into the cache by the setup hook that
+                # `runHook preConfigure` just fired. `-lc++abi`/`-lunwind` in
+                # `--extra-libs` resolve here.
+                cxxlib=$(dirname "$(find "$XDG_CACHE_HOME/unpin-llvm" -path '*/cxx/lib/libunwind.a' 2>/dev/null | head -1)")
+                test -n "$cxxlib" || { echo "engine cxx sysroot not seeded"; exit 1; }
+                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
+                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
+                ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
+                ln -sf "$cxxlib/libunwind.a"          "$TMPDIR/cxx-static/libunwind.a"
+              ''}
               export NIX_LDFLAGS="-L$TMPDIR/cxx-static $NIX_LDFLAGS"
             ''}
             # ffmpeg's `require_cpp_condition` for x264 trips on the
             # default x264.h header decoration; drop the check.
             sed -i '/X264_API_IMPORTS/d' configure
             ./configure ${builtins.concatStringsSep " " flags}
+            ${pkgs.lib.optionalString (stdenv.hostPlatform.isPower64 or false) ''
+              # `maclhw`/`mullhw` (libavcodec/ppc/mathops.h `#if HAVE_PPC4XX`) are
+              # 32-bit PPC-4xx/BookE MAC instructions absent on any 64-bit PowerPC.
+              # configure's `check_inline_asm ppc4xx` compiles a `maclhw` snippet
+              # to set HAVE_PPC4XX, but under the engine's `-flto` clang defers
+              # inline-asm assembly to link time → the probe is a false positive and
+              # `enable`s ppc4xx even over `--disable-ppc4xx`. Force HAVE_PPC4XX off
+              # in the generated config.h (what mathops.h reads), else the invalid
+              # instruction only detonates at the LTO fold-link.
+              sed -i 's/#define HAVE_PPC4XX 1/#define HAVE_PPC4XX 0/' config.h
+            ''}
             runHook postConfigure
           '';
 
@@ -235,18 +357,6 @@
           '';
 
           passthru = { pname = "ffmpeg"; inherit (pkgs.ffmpeg-headless) version; };
-        } // pkgs.lib.optionalAttrs (stdenv.hostPlatform.isRiscV or false) {
-          # riscv64: musl's <bits/syscall.h> predates the riscv_hwprobe
-          # syscall (Linux 6.4), but the cross kernel headers ship
-          # <asm/hwprobe.h>. ffmpeg's libavutil/riscv/cpu.c then includes
-          # the struct and calls syscall(__NR_riscv_hwprobe, ...) with the
-          # number undefined → "'__NR_riscv_hwprobe' undeclared". Define the
-          # canonical riscv value (258) when the libc headers lack it, after
-          # the real include so a newer musl still wins. Keeps
-          # --enable-runtime-cpudetect's V-extension probe working.
-          postPatch = ''
-            sed -i 's|#include <sys/syscall.h>|#include <sys/syscall.h>\n#ifndef __NR_riscv_hwprobe\n#define __NR_riscv_hwprobe 258\n#endif|' libavutil/riscv/cpu.c
-          '';
         });
       # `mkExtras` returns the cross-platform set of feature flags and
       # build inputs that ride on `sharedExtras`. Parameterised on a
@@ -256,6 +366,8 @@
       # fine).
       mkExtras = pkgsStaticScope:
         let
+          isEngineScope = pkgsStaticScope.lib.hasInfix "unpin-cc"
+            (pkgsStaticScope.stdenv.cc.name or "");
           # Direct (no-feature-disable) fixes pulled in from nix-lib's
           # native-overlay. See `nix-lib/native-overlay/<pkg>.nix` for
           # the per-package rationale.
@@ -263,7 +375,15 @@
           x265Static     = ulib.nativeFixes.x265           pkgsStaticScope;
           xvidStatic     = ulib.nativeFixes.xvidcore       pkgsStaticScope;
           gmeStatic      = ulib.nativeFixes.game-music-emu pkgsStaticScope;
-          librsvgStatic  = ulib.nativeFixes.librsvg        pkgsStaticScope;
+          # librsvg (Rust) can't be an engine derivation — rustc's configureFlags
+          # need the cc's libc, which the engine wrapper nulls out. On the engine
+          # scopes (linux/darwin) nix-lib injects a PRISTINE, already-fixed librsvg
+          # into `pkgsStatic.librsvg`, folded as a native sidecar; use it directly.
+          # mingw isn't an engine scope, so apply the fix normally there (it also
+          # carries the mingw-only `-lshell32` rustflag).
+          librsvgStatic  = if pkgsStaticScope.stdenv.hostPlatform.isMinGW or false
+                           then ulib.nativeFixes.librsvg pkgsStaticScope
+                           else pkgsStaticScope.librsvg;
           libvpxPkg      = ulib.nativeFixes.libvpx         pkgsStaticScope;
           quircStatic    = ulib.nativeFixes.quirc          pkgsStaticScope;
           # Feature-disable fixes that the user signed off on (the
@@ -354,11 +474,17 @@
               fontconfig fontconfig.dev
             ])
             ++ [ librsvgStatic librsvgStatic.dev ]
-            # libunwind only needed for musl Rust targets (librsvg's
-            # rustc --print=native-static-libs returns -lunwind).
-            # mingw uses SEH; libunwind doesn't build there (ucontext.h
-            # POSIX-only) and isn't needed.
-            ++ (if pkgsStaticScope.stdenv.hostPlatform.isMinGW or false
+            # nongnu libunwind was added only to satisfy the `-lunwind` rustc
+            # reports for musl Rust (librsvg). On the ENGINE that token is
+            # already served by LLVM libunwind (`--extra-libs=-lunwind` → the
+            # sysroot cxx/lib unwinder), so pulling nongnu libunwind too is
+            # redundant — and on i686 harmful: its 32-bit `_Unwind_Resume`
+            # (x86/Gos-linux.c) resumes via libc `setcontext`, absent in
+            # musl-i686, so folding its bitcode leaves setcontext undefined
+            # (x86_64 links because libunwind ships its own setcontext.S).
+            # Engine (all linux + darwin) → drop it; only off-engine would need
+            # it, and the sole off-engine target is mingw (SEH, excluded anyway).
+            ++ (if isEngineScope || (pkgsStaticScope.stdenv.hostPlatform.isMinGW or false)
                 then [ ]
                 else [ pkgsStaticScope.libunwind ]);
         };
@@ -380,9 +506,71 @@
       # the pages native/darwin embed, no nixpkgs graft.
 
       # Execute the built binary in CI (esp. windows-x86_64, which only
-      # runs here). `-version` prints the banner + full configure line.
-      smoke = [ "-version" ];
-      smokePattern = "ffmpeg version";
+      # runs here). TRANSCODE, don't just print: `-version` never opens a file,
+      # a device or a terminal, so it stayed green through a fold that had
+      # replaced libc's `ioctl` with a NULL pointer (zvbi's LD_PRELOAD shim —
+      # see nix-lib/native-overlay/zvbi.nix) and segfaulted on every real run.
+      # A synthetic source through lavfi into the null muxer needs no input
+      # file and writes no output, so it works identically on every runner,
+      # while exercising demux → decode → filter → encode → mux. The summary
+      # line only prints once the mux actually finished.
+      smoke = [
+        "-hide_banner"
+        "-f" "lavfi" "-i" "testsrc=size=64x48:rate=25"
+        "-t" "0.2"
+        "-f" "null" "-"
+      ];
+      smokePattern = "video:[0-9]+KiB";
+
+      # Build via the unpin-llvm engine + bitcode self-fold. ffmpeg installs
+      # two mains (ffmpeg + ffprobe) that share the whole libav* code; the
+      # engine folds them into one `ffmpeg` dispatcher with `ffprobe` as an
+      # argv[0] alias. requires.cxx: x265/svt-av1/aom/libwebp/libopenmpt/
+      # harfbuzz/chromaprint/librsvg drag libc++ into the closure.
+      engine = "unpin-llvm";
+      multicall = {
+        requires.cxx = true;
+        # darwin: the mega relinks from bitcode, so it must name the frameworks
+        # itself — nothing propagates here from ffmpeg-static's buildInputs, and
+        # ffmpeg's configure never recorded them as flags (the link line the hook
+        # captures holds archives only). Derived, not guessed: take the undefined
+        # symbols of module.bc + module_native.a AND of every auto-derived dep
+        # archive, subtract what all of those plus libSystem define, and map the
+        # remainder against the SDK's .tbd exports. Scanning only the module is a
+        # LOWER BOUND — the mega globs `lib/*.a` across the closure, so a pulled
+        # archive's own references count too (that is what Accelerate and
+        # DiskArbitration turned out to be). What survives this list is 16 symbols,
+        # all explained: `__dso_handle` comes from the linker, and the
+        # `ff_mlp_{fir,iir}order_*` are ffmpeg's own module-level inline asm, absent
+        # from the IR symbol table and materialized only at codegen.
+        #
+        # Four groups: ffmpeg's own darwin backends (VideoToolbox/CoreMedia/
+        # CoreVideo, AudioToolbox/CoreAudio, AVFoundation for the avfoundation
+        # indev, OpenGL, Accelerate for vDSP's FFT); the text-rendering chain via
+        # librsvg → pango → cairo (CoreText/CoreGraphics/ImageIO); glib's gio, which
+        # reaches the macOS type and handler database (CoreServices), enumerates
+        # mounts through DiskArbitration, and posts notifications through
+        # Foundation/AppKit; and CoreFoundation/CoreImage under those. glib arrives
+        # even though ffmpeg never links it directly — librsvg is a Rust `staticlib`
+        # whose archive BUNDLES its native deps' objects. Ignored off darwin
+        # (darwinFrameworkFlags is host-gated).
+        requires.frameworks = [
+          "VideoToolbox" "CoreMedia" "CoreVideo" "AVFoundation"
+          "AudioToolbox" "CoreAudio" "OpenGL"
+          "CoreText" "CoreGraphics" "CoreImage" "ImageIO" "Accelerate"
+          "CoreServices" "CoreFoundation" "Foundation" "AppKit"
+          "DiskArbitration"
+        ];
+        programs = [
+          { name = "ffmpeg"; }
+          { name = "ffprobe"; }
+        ];
+        # ffmpeg + ffprobe share the entire libav* codebase; fold those private
+        # archives ONCE (not per-program) so libavcodec's module-level inline asm
+        # — e.g. mlpdsp's `.global ff_mlp_firorder_N` — isn't duplicated across
+        # the two modules (which the mega-link's integrated assembler rejects).
+        foldSharedArchives = true;
+      };
 
       # darwin's libSystem doesn't ship libpthread.a so --enable-pthreads
       # breaks the configure probe; linux is fine.
@@ -446,24 +634,51 @@
               {
                 fftw      = ulib.nativeFixes.fftw prev;
                 fftwFloat = ulib.nativeFixes.fftw (prev // { fftw = prev.fftwFloat; });
+                # libsndfile (pulled transitively) links the `libmpg123` attr —
+                # a distinct, already-libOnly package, NOT `mpg123` — whose
+                # mpg123/out123 CLI still gets built and dies on the engine LTO
+                # `undefined symbol: fputs`. Route it through the same lib-only
+                # fix (adds `--disable-components`). Overlay only `libmpg123`, not
+                # `mpg123`: libopenmpt re-applies `nativeFixes.mpg123` via
+                # `.override`, which would discard our overrideAttrs on an
+                # already-overlaid `mpg123`.
+                libmpg123 = ulib.nativeFixes.mpg123 prev;
               }
+              # Two i686-only codec fixes (same as sox — the engine cross-compiles
+              # every linux target with clang, including i686). Gated to isx86_32
+              # so every other arch keeps its cache hit.
+              // (if origPkgs.stdenv.hostPlatform.isx86_32 then {
+                # lame's `#ifdef HAVE_XMMINTRIN_H` SSE paths (__m128) don't compile
+                # on i686's -march=i686 baseline (no SSE); configure defines the
+                # macro anyway because its `_mm_sfence()` probe runs with clang's
+                # SSE2-capable default flags BEFORE lame appends -march=i686. Undef
+                # it post-configure → SSE blocks fall back to their scalar code.
+                lame = prev.lame.overrideAttrs (o: {
+                  postConfigure = (o.postConfigure or "") + ''
+                    sed -i '/#define HAVE_XMMINTRIN_H 1/d' config.h
+                  '';
+                });
+                # libvorbis' 32-bit-x86 CFLAGS case hardcodes `-mno-ieee-fp`, a
+                # GCC-only flag the engine clang rejects as fatal. It only relaxes
+                # IEEE FP for -ffast-math (already on); drop it.
+                libvorbis = prev.libvorbis.overrideAttrs (o: {
+                  postPatch = (o.postPatch or "") + ''
+                    substituteInPlace configure --replace-fail ' -mno-ieee-fp' ""
+                  '';
+                });
+              } else { })
               // (if origPkgs.stdenv.hostPlatform.isDarwin then {
                 glib       = ulib.nativeFixes.glib       prev;
-                graphite2  = ulib.nativeFixes.graphite2  prev;
                 fontconfig = ulib.nativeFixes.fontconfig prev;
                 pango      = ulib.nativeFixes.pango      prev;
                 cairo      = ulib.nativeFixes.cairo      prev;
                 dav1d      = ulib.nativeFixes.dav1d      prev;
                 libopus    = ulib.nativeFixes.libopus    prev;
               } else { })
-              # riscv64: libjpeg-turbo's RVV SIMD coverage helper fails to
-              # compile (see nix-lib/native-overlay/libjpeg-turbo.nix). Pulled
-              # transitively via librsvg → gdk-pixbuf/libtiff/libwebp plus
-              # openjpeg/libcaca. Gate to riscv so the other arches keep the
-              # unmodified (cache-hit) libjpeg.
-              // (if origPkgs.stdenv.hostPlatform.isRiscV then {
-                libjpeg = ulib.nativeFixes."libjpeg-turbo" prev;
-              } else { })
+              # riscv64 libjpeg-turbo's broken RVV simdcoverage helper is dropped
+              # SET-WIDE in nix-lib now (withLibjpegNoLto for the engine scope +
+              # the librsvg pristine scope), since librsvg's transitive libjpeg
+              # never passes through this per-flake overlay. Nothing to do here.
             );
           };
           isDarwin = pkgs.stdenv.isDarwin;
@@ -560,16 +775,24 @@
       # libs (x264, dav1d) that were built against pthreads. Same
       # `sharedExtras` feature set as linux/darwin — the per-package
       # `nativeFixes.X` registry handles mingw quirks transparently.
+      #
+      # mingw is off-engine, so the bitcode self-fold that gives linux/darwin a
+      # single `ffmpeg` with `ffprobe` as an argv[0] alias doesn't run here;
+      # ./multicall.nix does the equivalent fold by recompiling each program's
+      # fftools objects behind a per-program rename header.
       windowsBuild = pkgs:
         let
           cross = ulib.mingwStaticCross pkgs;
           extras = mkExtras cross;
         in
-        mkFfmpeg cross {
-          extraConfigureFlags =
-            [ "--disable-w32threads" "--enable-pthreads" ]
-            ++ extras.flags;
-          extraInputs = [ cross.windows.pthreads ] ++ extras.inputs;
+        import ./multicall.nix { lib = cross.lib // ulib; } {
+          pkgs = cross;
+          ffmpeg = mkFfmpeg cross {
+            extraConfigureFlags =
+              [ "--disable-w32threads" "--enable-pthreads" ]
+              ++ extras.flags;
+            extraInputs = [ cross.windows.pthreads ] ++ extras.inputs;
+          };
         };
     };
 }
