@@ -43,6 +43,12 @@
 #     `-lstdc++` is present — x265 puts it there) and the mingw `-static` flags
 #     are exactly the ones the normal link would have used.
 #
+# `defaultApplet = ffmpeg`: dispatch is by argv[0], and the shipped asset is
+# named `ffmpeg-<ver>-x86_64-windows.exe` — a stem that matches no applet. Without
+# a default, both that asset and CI's `smoke.exe` copy print the usage listing
+# instead of running ffmpeg. `ffprobe` still reaches its own main via the alias
+# symlink or `--unpin-program=ffprobe`.
+#
 # Aliases and man are NOT embedded here: `unpinEmbedWrap` (mkStandaloneFlake)
 # harvests `bin/ffprobe` as an alias and embeds the curated man set, as the
 # single post-build embed.
@@ -180,7 +186,7 @@ ffmpeg.overrideAttrs (oa: {
     fi
 
     printf '${appletLines}\n' > multicall/applets.list
-  ${lib.multicallTableDispatcherC { inherit name; }}
+  ${lib.multicallTableDispatcherC { inherit name; defaultApplet = name; }}
     $CC -O2 -c -o multicall/dispatcher.o multicall/dispatcher.c
 
     mk UNPIN_BIN=${name}.exe \
