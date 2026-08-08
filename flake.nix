@@ -39,7 +39,9 @@
           stdenv = pkgs.stdenv;
           isMinGW = stdenv.hostPlatform.isMinGW or false;
           isDarwin = stdenv.hostPlatform.isDarwin;
-          # unpin-llvm engine active on this scope (linux + darwin, not mingw).
+          # unpin-llvm engine active on this scope — linux, darwin AND the mingw
+          # cross, whose whole set multicall.windows = true swaps onto the
+          # adapter. Keyed on the cc name so a set-wide swap is seen.
           isEngine = pkgs.lib.hasInfix "unpin-cc" (stdenv.cc.name or "");
           targetOs =
             if isMinGW then "mingw64"
@@ -376,11 +378,13 @@
           xvidStatic     = ulib.nativeFixes.xvidcore       pkgsStaticScope;
           gmeStatic      = ulib.nativeFixes.game-music-emu pkgsStaticScope;
           # librsvg (Rust) can't be an engine derivation — rustc's configureFlags
-          # need the cc's libc, which the engine wrapper nulls out. On the engine
-          # scopes (linux/darwin) nix-lib injects a PRISTINE, already-fixed librsvg
-          # into `pkgsStatic.librsvg`, folded as a native sidecar; use it directly.
-          # mingw isn't an engine scope, so apply the fix normally there (it also
-          # carries the mingw-only `-lshell32` rustflag).
+          # need the cc's libc, which the engine wrapper nulls out. On the native
+          # engine scopes nix-lib injects a PRISTINE, already-fixed librsvg into
+          # `pkgsStatic.librsvg`, folded as a native sidecar; use it directly.
+          # The mingw set does NOT get that injection (windowsPkgsShared is a raw
+          # nixpkgs import — the withRustDeps layer only wraps the pkgsStatic
+          # chain), so keep applying the fix there. It also carries the
+          # mingw-only `-lshell32` rustflag.
           librsvgStatic  = if pkgsStaticScope.stdenv.hostPlatform.isMinGW or false
                            then ulib.nativeFixes.librsvg pkgsStaticScope
                            else pkgsStaticScope.librsvg;
@@ -529,6 +533,7 @@
       # harfbuzz/chromaprint/librsvg drag libc++ into the closure.
       engine = "unpin-llvm";
       multicall = {
+        windows = true;
         requires.cxx = true;
         # darwin: the mega relinks from bitcode, so it must name the frameworks
         # itself — nothing propagates here from ffmpeg-static's buildInputs, and
@@ -776,23 +781,23 @@
       # `sharedExtras` feature set as linux/darwin — the per-package
       # `nativeFixes.X` registry handles mingw quirks transparently.
       #
-      # mingw is off-engine, so the bitcode self-fold that gives linux/darwin a
-      # single `ffmpeg` with `ffprobe` as an argv[0] alias doesn't run here;
-      # ./multicall.nix does the equivalent fold by recompiling each program's
-      # fftools objects behind a per-program rename header.
+      # The bitcode self-fold reaches here too (multicall.windows = true), so the
+      # same `ffmpeg` dispatcher with `ffprobe` as an argv[0] alias is built from
+      # the captured module rather than by the hand-rolled cpp-rename recompile
+      # that used to live in ./multicall.nix. `binName` is itself an applet, so
+      # nix-lib picks `ffmpeg` as the bare-invocation default on both halves —
+      # which is what kept the released `ffmpeg-<ver>-x86_64-windows.exe` (a stem
+      # matching no applet) from printing a usage listing.
       windowsBuild = pkgs:
         let
           cross = ulib.mingwStaticCross pkgs;
           extras = mkExtras cross;
         in
-        import ./multicall.nix { lib = cross.lib // ulib; } {
-          pkgs = cross;
-          ffmpeg = mkFfmpeg cross {
-            extraConfigureFlags =
-              [ "--disable-w32threads" "--enable-pthreads" ]
-              ++ extras.flags;
-            extraInputs = [ cross.windows.pthreads ] ++ extras.inputs;
-          };
+        mkFfmpeg cross {
+          extraConfigureFlags =
+            [ "--disable-w32threads" "--enable-pthreads" ]
+            ++ extras.flags;
+          extraInputs = [ cross.windows.pthreads ] ++ extras.inputs;
         };
     };
 }
