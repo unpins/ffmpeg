@@ -195,12 +195,21 @@
                 # hardcoded `-lstdc++` (libgme…), but others (srt) come via
                 # `require_pkg_config` and their `.pc` omits the C++ runtime
                 # entirely (srt.pc: `Libs.private: -lmbedtls …`, no `-lstdc++`), so
-                # every `std::__1::…` from srt.a is undefined. Append `-lstdc++`
+                # every `std::__1::…` from srt.a is undefined. Append `-lc++`
                 # (→ libc++.a via the cxx-static shim) plus its `__cxa_*`/typeinfo
                 # (libc++abi) and `_Unwind_*` (LLVM libunwind), in dependency order.
                 # On a C-only dep's link these static archives simply aren't pulled.
+                #
+                # `-lc++` and not `-lstdc++` (the shim serves both from the same
+                # archive) because the name is also what tells the engine this link
+                # needs the C++ runtime: ffmpeg links with the C driver, and the
+                # musl front builds/points at `cxx/lib` only in C++ mode
+                # (`wantsCxx`, unpin_musl.cpp) — which `-lc++` satisfies. That is
+                # what makes `-lunwind` resolve from the ENGINE instead of from a
+                # copy staged here; see the cxx-static shim for why staging one
+                # breaks the fold. Same three tokens the windows branch uses.
                 ++ pkgs.lib.optionals isEngine [
-                  "--extra-libs=-lstdc++"
+                  "--extra-libs=-lc++"
                   "--extra-libs=-lc++abi"
                   "--extra-libs=-lunwind"
                 ]
@@ -363,19 +372,21 @@
                 # linux: use the COMPLETE upstream static libc++/libc++abi from
                 # nixpkgs (the engine sysroot's on-demand `cxx/lib/libc++.a` is a
                 # re-archived subset — enough for libgme but missing the locale/
-                # iostream/random_device members srt's C++ pulls). Their `_Unwind_*`
-                # unwinder, though, lives ONLY in LLVM libunwind: nixpkgs `libunwind`
-                # is nongnu (lacks them) and `llvmPackages.libunwind` is an empty
-                # stub, so take libunwind.a from the sysroot `cxx/lib` (the exact one
-                # clang++ links), seeded into the cache by the setup hook that
-                # `runHook preConfigure` just fired. `-lc++abi`/`-lunwind` in
-                # `--extra-libs` resolve here.
-                cxxlib=$(dirname "$(find "$XDG_CACHE_HOME/unpin-llvm" -path '*/cxx/lib/libunwind.a' 2>/dev/null | head -1)")
-                test -n "$cxxlib" || { echo "engine cxx sysroot not seeded"; exit 1; }
+                # iostream/random_device members srt's C++ pulls).
+                #
+                # `-lunwind` is NOT staged here. Its only provider is the engine's
+                # own `cxx/lib/libunwind.a` (nixpkgs `libunwind` is nongnu and lacks
+                # `_Unwind_*`; `llvmPackages.libunwind` is an empty stub), and the
+                # driver serves it: the `-lc++` in `--extra-libs` puts the musl front
+                # in C++ mode, which is what adds `cxx/lib` to -L. Staging a copy
+                # would cost the fold — this dir is in the BUILD TREE, so the capture
+                # shim records a resolved `-L$TMPDIR/cxx-static -lunwind` as LOCALA,
+                # `module.bc` swallows the unwinder, and it collides with the mega
+                # link's own `-lunwind` (`duplicate symbol: _Unwind_VRS_Get`, armv7l).
+                # Anything the engine supplies must reach the link via the engine.
                 ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
                 ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
                 ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
-                ln -sf "$cxxlib/libunwind.a"          "$TMPDIR/cxx-static/libunwind.a"
               ''}
               export NIX_LDFLAGS="-L$TMPDIR/cxx-static $NIX_LDFLAGS"
             ''}
