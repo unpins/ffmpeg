@@ -169,10 +169,26 @@
                 #    dual-static-archive link path.
                 "--enable-static" "--disable-shared"
                 "--extra-ldflags=-static"
-                "--extra-ldflags=-static-libgcc"
-                "--extra-ldflags=-static-libstdc++"
                 "--extra-ldflags=-Wl,--allow-multiple-definition"
               ]
+              ++ (if isEngine then [
+                # Engine mingw: `-static-libgcc`/`-static-libstdc++` name gcc
+                # runtimes that do not exist here, so the C++ deps had nothing
+                # holding their runtime — same gap the linux/darwin branches
+                # already close, just never reached on windows before this
+                # target moved onto the engine. It shows up as configure
+                # rejecting the FIRST C++ dep it probes through
+                # `require_pkg_config` ("chromaprint not found"): its `.pc` is
+                # `-lchromaprint` alone, the probe links with the C driver, and
+                # every `std::`/`__cxa_*` is undefined. Names, not `.a` paths —
+                # the cxx-static shim below is already on NIX_LDFLAGS.
+                "--extra-libs=-lc++"
+                "--extra-libs=-lc++abi"
+                "--extra-libs=-lunwind"
+              ] else [
+                "--extra-ldflags=-static-libgcc"
+                "--extra-ldflags=-static-libstdc++"
+              ])
               else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ]
                 # Engine linux: force the whole static C++ runtime onto every link.
                 # C++ codec deps split two ways: some ffmpeg detects with a
@@ -246,6 +262,29 @@
             + pkgs.lib.optionalString (stdenv.hostPlatform.isRiscV or false) ''
               sed -i 's|#include <sys/syscall.h>|#include <sys/syscall.h>\n#ifndef __NR_riscv_hwprobe\n#define __NR_riscv_hwprobe 258\n#endif|' libavutil/riscv/cpu.c
             ''
+            # Engine mingw: reach upstream's OWN guard for clang + LTO + windows.
+            # configure already carries it, citing llvm/llvm-project#76046 —
+            # "Clang's LTO fails on Windows, when there are references outside of
+            # inline assembly to nonlocal labels defined within inline assembly"
+            # — but it sits inside `if enabled lto`, meaning ffmpeg's own
+            # `--enable-lto`. Here the `-flto` comes from the stdenv, so configure
+            # never knows and the probe passes: mlpdsp_init.c's `firtable`/
+            # `iirtable` then take the address of labels living inside a function's
+            # asm block, which LLVM's symbol table cannot see. ELF resolves them
+            # anyway at LTO codegen; COFF routes the reference through a `.refptr`
+            # COMDAT that needs a GLOBAL symbol, so all 14 `ff_mlp_*order_*` come
+            # out undefined at the final link.
+            #
+            # Turning on `--enable-lto` instead would reach the same guard, but it
+            # also flips `inline_asm_direct_symbol_refs` and `symver_asm_label`
+            # for every target — this changes only what is actually broken.
+            + pkgs.lib.optionalString (isEngine && isMinGW) ''
+              # Match up to the probe name only — the argument that follows is
+              # nested quoting the shell would eat; `#` comments out the rest.
+              substituteInPlace configure \
+                --replace-fail 'check_inline_asm inline_asm_nonlocal_labels' \
+                               'disable inline_asm_nonlocal_labels #'
+            ''
             ;
 
           # pkgsBuildHost is the canonical "build tools that target host"
@@ -306,6 +345,20 @@
                 ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
                 ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
                 ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
+              '' else if isMinGW then ''
+                # windows: all four from the engine's own seeded sysroot. Reaching
+                # for `pkgs.libcxx` here means nixpkgs' MINGW libc++, and behind it
+                # nixpkgs' mingw clang wrapper and a mingw cross gcc — which this
+                # scope would build with the engine's lld, and gcc's libgcc_s.dll
+                # rule passes `-rpath-link`, an ELF flag lld's mingw driver rejects.
+                # It is the wrong libc++ besides: built against msvcrt with gcc,
+                # while everything on this link line is UCRT.
+                cxxlib=$(dirname "$(find "$XDG_CACHE_HOME/unpin-llvm" -path '*/cxx/lib/libunwind.a' 2>/dev/null | head -1)")
+                test -n "$cxxlib" || { echo "engine cxx sysroot not seeded"; exit 1; }
+                ln -sf "$cxxlib/libc++.a"    "$TMPDIR/cxx-static/libc++.a"
+                ln -sf "$cxxlib/libc++.a"    "$TMPDIR/cxx-static/libstdc++.a"
+                ln -sf "$cxxlib/libc++abi.a" "$TMPDIR/cxx-static/libc++abi.a"
+                ln -sf "$cxxlib/libunwind.a" "$TMPDIR/cxx-static/libunwind.a"
               '' else ''
                 # linux: use the COMPLETE upstream static libc++/libc++abi from
                 # nixpkgs (the engine sysroot's on-demand `cxx/lib/libc++.a` is a
