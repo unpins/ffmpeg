@@ -67,7 +67,7 @@ built-in codecs, formats and filters:
 
 ### On Linux, macOS and Windows
 
-- **Network** — HTTPS and the other TLS protocols (mbedtls), SRT (libsrt), SFTP
+- **Network** — HTTPS and the other TLS protocols (OpenSSL), SRT (libsrt), SFTP
   (libssh), RIST (librist), and RTMP including `rtmps://`, `rtmpe://` and
   `rtmpts://`
 - **Video encoders** — libx264 (H.264), libx265 (H.265, 8/10/12-bit), libsvtav1 and libaom (AV1), libvpx (VP8/VP9), libxvid, libtheora
@@ -96,12 +96,13 @@ These rely on Linux kernel interfaces:
 ## Build notes
 
 - **TLS certificates are not checked by default**, as in upstream FFmpeg. With
-  `-tls_verify 1`, also pass `-ca_file` with a CA bundle (for example
-  `/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu): this build does
-  not read the system's certificate store.
+  `-tls_verify 1` they are checked against the system's CA certificates on
+  Linux and macOS. On Windows, and on a system with none installed, the binary
+  uses the Mozilla root certificates built into it. `-ca_file` (or the
+  `SSL_CERT_FILE` environment variable) selects another bundle.
 - **Not included:** `ffplay`; hardware acceleration (VAAPI, VDPAU, NVENC,
-  VideoToolbox, Vulkan), which loads vendor drivers at run time; OpenSSL,
-  GnuTLS and libsmbclient; and the libjxl, libgsm, openh264, rav1e, kvazaar,
+  VideoToolbox, Vulkan), which loads vendor drivers at run time; GnuTLS and
+  libsmbclient; and the libjxl, libgsm, openh264, rav1e, kvazaar,
   vvenc, libvmaf, lcms2 and libplacebo integrations.
 - **Tests:** FFmpeg's own test suite (FATE) does not run in this build. Every
   build it can run encodes a short clip through libaom, SVT-AV1, libvpx,

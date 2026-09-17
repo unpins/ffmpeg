@@ -8,8 +8,17 @@
   on a machine whose DNS resolver is missing or unreachable — Android, or a
   container with no `/etc/resolv.conf` — once you point unpins at a name server.
 
+### Changed
+
+- TLS (`https://`, `rtmps://`, …) now uses OpenSSL instead of mbedtls.
+
 ### Fixed
 
+- `-tls_verify 1` rejected every server, even with a valid certificate, unless
+  `-ca_file` was also given: the binary did not read the system's CA
+  certificates. It now uses them on Linux and macOS, and the Mozilla root
+  certificates built into the binary on Windows and on a system with none
+  installed.
 - `drawtext` without `fontfile=` failed on macOS and Windows with "Cannot find
   a valid font for the family Sans": the binary only looked for fonts in a
   folder that exists on the machine that built it. When no fontconfig
