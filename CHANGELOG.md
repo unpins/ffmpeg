@@ -16,6 +16,8 @@
   configuration is installed it now uses the system's font folders — on
   Windows the system and per-user Fonts folders, on macOS `/System/Library/Fonts`
   and `/Library/Fonts`.
+- On Windows, `-c:v libtheora` wrote a broken stream: past the first frame,
+  players and decoders reported errors ("error in unpack_block_qpis").
 - The Linux ppc64le binary encoded broken video with `-c:v libx264`: a short
   clip came out at a fraction of the quality at four times the size. The
   rebuilt binary encodes it like the other platforms. Measured under emulation.
