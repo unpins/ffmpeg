@@ -1,6 +1,6 @@
 # ffmpeg
 
-[FFmpeg](https://ffmpeg.org/) — headless, no GUI player. A single self-contained binary, built natively for Linux, macOS, and Windows.
+[FFmpeg](https://ffmpeg.org/) — record, convert and stream audio and video. A single self-contained binary, built natively for Linux, macOS, and Windows.
 
 [![CI](https://github.com/unpins/ffmpeg/actions/workflows/ffmpeg.yml/badge.svg)](https://github.com/unpins/ffmpeg/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
@@ -9,14 +9,14 @@
 
 Part of the [unpins](https://unpins.org) catalog; install it with [`unpin`](https://github.com/unpins/unpin): `unpin install ffmpeg`.
 
-Ships `ffmpeg` and `ffprobe`. `ffplay` is intentionally omitted — see [Excluded features](#excluded-features) below.
+Ships `ffmpeg` and `ffprobe`. The `ffplay` player is not included.
 
 ## Usage
 
 Run the `ffmpeg` program with [unpin](https://github.com/unpins/unpin):
 
 ```bash
-unpin ffmpeg -i input.mp4 output.mkv
+unpin ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mkv
 ```
 
 To install the programs onto your PATH:
@@ -27,12 +27,19 @@ unpin install ffmpeg
 
 `unpin install ffmpeg` creates the `ffmpeg` and `ffprobe` commands.
 
-## Programs
-
-| command   | what it does                                       |
-| --------- | -------------------------------------------------- |
-| `ffmpeg`  | transcode and process audio / video                |
+| command   | what it does                                        |
+| --------- | --------------------------------------------------- |
+| `ffmpeg`  | transcode and process audio / video                 |
 | `ffprobe` | inspect a media file's streams, format and metadata |
+
+## Man pages
+
+13 man pages are embedded in the binary: the two programs and FFmpeg's
+reference manuals. Read them with `unpin man ffmpeg` (the `ffmpeg` page),
+`unpin man ffmpeg ffprobe`, or `unpin man ffmpeg ffmpeg-filters` — likewise
+`ffmpeg-codecs`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`,
+`ffmpeg-bitstream-filters`, `ffmpeg-utils`, `ffmpeg-scaler`,
+`ffmpeg-resampler`, and the complete `ffmpeg-all` and `ffprobe-all`.
 
 ## Build locally
 
@@ -55,62 +62,49 @@ The [Releases](https://github.com/unpins/ffmpeg/releases) page has standalone bi
 
 ## Features
 
-`ffmpeg -version` prints the full configure line. The feature matrix below is the source of truth.
+`ffmpeg -buildconf` lists what this build was configured with. Beyond FFmpeg's
+built-in codecs, formats and filters:
 
-### Common to Linux / macOS / Windows
+### On Linux, macOS and Windows
 
-- **TLS / HTTPS** — mbedtls
-- **Video encoders** — libx264 (H.264), libx265 (H.265, 8/10/12-bit), libsvtav1 (AV1), libaom (AV1 ref), libvpx (VP8/VP9), libxvid, libtheora
-- **Video decoders** — libdav1d (AV1 perf)
+- **Network** — HTTPS and the other TLS protocols (mbedtls), SRT (libsrt), SFTP
+  (libssh), RIST (librist), and RTMP including `rtmps://`, `rtmpe://` and
+  `rtmpts://`
+- **Video encoders** — libx264 (H.264), libx265 (H.265, 8/10/12-bit), libsvtav1 and libaom (AV1), libvpx (VP8/VP9), libxvid, libtheora
+- **Video decoders** — libdav1d (AV1)
 - **Audio encoders** — libopus, libvorbis, libmp3lame, libtwolame (MP2), libspeex, libopencore-amrnb
-- **Audio decoders** — libopencore-amrwb, libopenmpt (tracker formats: MOD / XM / IT / S3M / MPTM / …)
-- **Audio processing** — libsoxr (resampler), librubberband (time-stretch / pitch-shift), libbs2b (Bauer stereo crossfeed), libmysofa (HRTF / SOFAlizer)
-- **Image** — libwebp, libopenjpeg (JPEG 2000), librsvg (SVG → raster), zimg (color / scaling)
-- **Containers / compression** — zlib, bzip2, lzma, iconv
-- **Subtitles / fonts** — libass + freetype + harfbuzz + fribidi + fontconfig
-- **Manifests** — libxml2 (DASH / HLS)
-- **Streaming protocols** — SRT (libsrt), SFTP (libssh), RTMP (ffmpeg-native, incl. `rtmpe://` / `rtmps://` / `rtmpts://` over mbedtls — no librtmp), RIST (librist)
-- **Discs** — libbluray
-- **Filters** — libqrencode (QR overlay / source), libquirc (QR decoder), libvidstab (video stabilization)
-- **Demuxers** — libgme (NES / SNES / Genesis / GameBoy / MSX chiptune)
-- **Captions** — libzvbi (DVB teletext + VBI)
-- **Fingerprint** — chromaprint muxer (AcoustID)
+- **Audio decoders** — libopencore-amrwb, libopenmpt (tracker formats: MOD / XM / IT / S3M / MPTM / …), libgme (NES / SNES / Genesis / Game Boy / MSX chiptunes)
+- **Audio processing** — libsoxr (resampler), librubberband (time-stretch / pitch-shift), libbs2b (stereo crossfeed), libmysofa (HRTF / `sofalizer`)
+- **Images** — libwebp, libopenjpeg (JPEG 2000), librsvg (SVG), zimg (`zscale`)
+- **Compression** — zlib, bzip2, lzma, iconv
+- **Text and subtitles** — libass, freetype, harfbuzz, fribidi, fontconfig (`subtitles`, `drawtext`)
+- **Streaming manifests** — libxml2 (DASH / HLS)
+- **Blu-ray** — libbluray
+- **Filters** — libqrencode (QR codes), libquirc (QR decoding), libvidstab (stabilization)
+- **Teletext** — libzvbi (DVB teletext and VBI)
+- **Fingerprints** — the chromaprint muxer (AcoustID)
 
-### Linux-only
+### Linux only
 
-Features that depend on a Linux-specific kernel ABI or socket — physically not portable:
+These rely on Linux kernel interfaces:
 
 - **kmsgrab** — KMS / DRM screen capture via libdrm (needs `CAP_SYS_ADMIN` or DRM master)
-- **x11grab** — X11 screen capture via libxcb (needs only the X server socket)
-- **CD audio** — libcdio + libcdio-paranoia (Linux CDDA ioctls)
-- **Terminal output** — libcaca (color ASCII-art `caca_outdev`)
+- **x11grab** — X11 screen capture via libxcb
+- **CD audio** — libcdio + libcdio-paranoia
+- **Terminal output** — libcaca (`caca` output device)
 
 ## Build notes
 
-### Crypto backend
-
-mbedtls everywhere — ffmpeg's own TLS (`--enable-mbedtls`) and the static crypto backend for libsrt + libssh. OpenSSL is excluded: it drags the full provider stack for a few SHA/AES symbols (~5 MB on Linux, same features).
-
-### Single binary, no companion DLLs
-
-Each platform ships one executable (plus `ffprobe`), per the [dynamic-link-policy](https://github.com/unpins/docs/blob/main/dynamic-link-policy.md). On Windows the GCC runtime (libgcc, libstdc++, libwinpthread, libmcfgthread) is folded into the `.exe`. See `flake.nix` and `nix-lib/mingw-overlay/x265.nix` for the link mechanics.
-
-### Man pages
-
-13 man pages are embedded in the binary — read with `unpin man ffmpeg` (or `ffprobe`, `ffmpeg-filters`, `ffmpeg-codecs`, …). The set is the two programs plus the component reference manuals (`ffmpeg-utils`, `ffmpeg-formats`, `ffmpeg-protocols`, `ffmpeg-devices`, `ffmpeg-bitstream-filters`, `ffmpeg-scaler`, `ffmpeg-resampler`, and the `-all` variants). `ffplay.1` and the `libav*.3` library docs are excluded — we ship the CLI binaries, not ffplay or the libraries.
-
-### Excluded features
-
-- **ffplay** — needs the SDL2 renderer/audio chain; static cross-platform SDL2 isn't in this build. Tracked alongside `mpv`.
-- **Hardware acceleration** (vaapi, vdpau, nvenc, videotoolbox, vulkan) — each `dlopen`s a vendor driver; musl-static can't load glibc `.so`s, and Windows/macOS hit the same wall. Needs the planned `libdl-interceptor v2`.
-- **OpenSSL backends** — see Crypto backend above.
-- **libsmbclient, libjxl, libgsm, openh264, libxavs2, libdavs2** — deferred, not yet clean under `pkgsStatic`/`pkgsCross`.
-- **kmsgrab / x11grab / libcaca / libcdio on macOS + Windows** — physically Linux-only (see Linux-only above).
-
-### Codec set selection
-
-nixpkgs' `pkgsStatic.ffmpeg-headless` is not reused (it pulls openapv / ocl-icd / libtiff / libsndfile, which break under `pkgsStatic`). This flake configures its own codec set; see `flake.nix` and `nix-lib/native-overlay/*.nix`.
-
-### Tests
-
-No suite runs: FFmpeg's FATE needs gigabytes of sample media + network. CI instead smoke-runs `ffmpeg -version` on every target (incl. the Windows `.exe`).
+- **TLS certificates are not checked by default**, as in upstream FFmpeg. With
+  `-tls_verify 1`, also pass `-ca_file` with a CA bundle (for example
+  `/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu): this build does
+  not read the system's certificate store.
+- **Not included:** `ffplay`; hardware acceleration (VAAPI, VDPAU, NVENC,
+  VideoToolbox, Vulkan), which loads vendor drivers at run time; OpenSSL,
+  GnuTLS and libsmbclient; and the libjxl, libgsm, openh264, rav1e, kvazaar,
+  vvenc, libvmaf, lcms2 and libplacebo integrations.
+- **Tests:** FFmpeg's own test suite (FATE) does not run in this build. Every
+  build it can run encodes a short clip through libaom, SVT-AV1, libvpx,
+  libx264, libx265, libtheora, FFV1, LAME, Opus and Vorbis, and CI runs a
+  multi-encoder transcode on each platform it can execute, the Windows `.exe`
+  included.
