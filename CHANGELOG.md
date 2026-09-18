@@ -4,6 +4,11 @@
 
 ### Added
 
+- Builds now verify their own optimized code: on every platform where the build
+  can run the binary it produces, each hand-written SIMD routine is checked
+  against FFmpeg's portable C version of the same operation, roughly 15 000
+  comparisons. Nothing changes for you unless one disagrees, in which case the
+  build stops instead of shipping.
 - On Linux, hostnames in URLs (`http://`, `rtmp://`, `srt://`, …) now resolve
   on a machine whose DNS resolver is missing or unreachable — Android, or a
   container with no `/etc/resolv.conf` — once you point unpins at a name server.

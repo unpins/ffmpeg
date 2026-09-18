@@ -104,8 +104,11 @@ These rely on Linux kernel interfaces:
   VideoToolbox, Vulkan), which loads vendor drivers at run time; GnuTLS and
   libsmbclient; and the libjxl, libgsm, openh264, rav1e, kvazaar,
   vvenc, libvmaf, lcms2 and libplacebo integrations.
-- **Tests:** FFmpeg's own test suite (FATE) does not run in this build. Every
-  build it can run encodes a short clip through libaom, SVT-AV1, libvpx,
-  libx264, libx265, libtheora, FFV1, LAME, Opus and Vorbis, and CI runs a
-  multi-encoder transcode on each platform it can execute, the Windows `.exe`
-  included.
+- **Tests:** every build that can run its own binary checks the hand-written
+  SIMD routines against FFmpeg's portable C ones — the same comparison
+  upstream's `checkasm` does, about 15 000 of them — and then encodes a short
+  clip through libaom, SVT-AV1, libvpx, libx264, libx265, libtheora, FFV1,
+  LAME, Opus and Vorbis. CI additionally runs a multi-encoder transcode on each
+  platform it can execute, the Windows `.exe` included. The rest of FFmpeg's
+  suite (FATE) does not run: nearly all of it needs a 1.35 GB sample archive
+  that upstream publishes with no version and no checksum to pin.

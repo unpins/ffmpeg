@@ -457,6 +457,63 @@
           '';
 
           passthru = { pname = "ffmpeg"; inherit (pkgs.ffmpeg-headless) version; };
+        }
+        # Gated so the targets that cannot run it keep the derivation they
+        # already had: an inert `checkPhase` string still changes a drv hash,
+        # and rebuilding windows/armv7l/ppc64le/riscv64 to ship a test none of
+        # them executes is churn with nothing on the other side. (The install
+        # check above is ungated for historical reasons; folding it in here
+        # would move those same four derivations for no behaviour change.)
+        // pkgs.lib.optionalAttrs (stdenv.buildPlatform.canExecute stdenv.hostPlatform) {
+          # FATE's one slice that needs no sample data: checkasm runs each
+          # hand-written SIMD kernel against the C reference in the same
+          # process and compares the results. That is the class of defect that
+          # has broken here under the engine and stayed green all the way to a
+          # release — libhwy's f16 ABI, x265's strtod on i686, a false-positive
+          # `HAVE_PPC4XX` probe — because `-version` and the encode check above
+          # prove the code *runs*, never that it computes what the C path
+          # computes. `--enable-runtime-cpudetect` is already on, so one run
+          # exercises every SIMD level the host CPU offers.
+          #
+          # The rest of FATE stays out on purpose: 98 of its 114 test files
+          # need the 1.35 GB rsync sample suite, which upstream publishes as a
+          # mutable directory with no tarball, no version and no checksum —
+          # nothing to pin a fixed-output derivation to.
+          doCheck = true;
+          checkPhase = ''
+            runHook preCheck
+            make -j"''${NIX_BUILD_CORES:-4}" tests/checkasm/checkasm
+
+            # One invocation runs every registered test; `make fate-checkasm`
+            # spends 91 process starts to cover the same functions.
+            #
+            # The trailing `1` is checkasm's seed argument. Upstream lets it
+            # default to a random one, which is right for a fuzzer and wrong
+            # for a build: a kernel that fails on one seed in twenty would
+            # turn every rebuild into a coin flip and never reproduce. Fixed
+            # seed makes a red build mean something and a green build a fact.
+            ./tests/checkasm/checkasm 1 2>&1 | tee checkasm.log
+
+            # checkasm exits 0 when it registers nothing at all — it prints
+            # "checkasm: all 0 tests passed" and returns success, which is
+            # precisely the vacuous green a guard like this exists to avoid.
+            # Pin it to something that cannot be configured away: libavutil's
+            # six kernels (aes, av_tx, crc, fixed_dsp, float_dsp, lls) are in
+            # tests/checkasm/Makefile ungated, so a live harness always
+            # checks at least one of them.
+            ./tests/checkasm/checkasm --test=float_dsp 1 2>&1 | tee checkasm-floor.log
+
+            # `tee` hides the exit status, and the pass line is printed only
+            # on success, so read the verdict out of the logs instead.
+            for log in checkasm.log checkasm-floor.log; do
+              grep -q '^checkasm: all [0-9]* tests passed$' "$log" \
+                || { echo "checkasm: no pass line in $log" >&2; exit 1; }
+            done
+            floor=$(sed -n 's/^checkasm: all \([0-9]*\) tests passed$/\1/p' checkasm-floor.log)
+            [ "''${floor:-0}" -ge 1 ] \
+              || { echo "checkasm: float_dsp registered no check — harness is vacuous" >&2; exit 1; }
+            runHook postCheck
+          '';
         });
       # `mkExtras` returns the cross-platform set of feature flags and
       # build inputs that ride on `sharedExtras`. Parameterised on a
