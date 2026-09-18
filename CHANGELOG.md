@@ -15,6 +15,7 @@
 
 ### Changed
 
+- Updated to FFmpeg 8.1.2.
 - TLS (`https://`, `rtmps://`, …) now uses OpenSSL instead of mbedtls.
 
 ### Fixed
