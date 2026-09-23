@@ -105,33 +105,16 @@
           # LDFLAGS=-static internally (same trap that hit htop / tmux),
           # so omit those too on darwin.
           #
-          # The C++ codec deps drag in libc++ two ways, both of which
-          # default to the dynamic /usr/lib/libc++.1.dylib that the
-          # portability allowlist rejects (libc++ must be folded in
-          # statically):
-          #   - dep `.pc` `Libs.private` under `--pkg-config-flags=--static`
-          #     (libgme `-lstdc++`, chromaprint `-lc++`, …);
-          #   - ffmpeg's own hardcoded `-lstdc++` in the libgme/libopenmpt/
-          #     librubberband/libsnappy `require` probes.
-          # We can't suppress those tokens (they come from many sources and
-          # also gate configure's lib-detection link tests), so instead we
-          # make them *resolve static*: configurePhase drops a `-L` shim
-          # exposing libc++.a as both `libc++.a` and `libstdc++.a` (and
-          # `libc++abi.a`) ahead of the dylib dirs, and we pass
-          # `-Wl,-search_paths_first` on the final link so ld64 takes the
-          # `.a` from the shim dir instead of falling back to its default
-          # `-search_dylibs_first` (which finds libc++.1.dylib first). That
-          # makes every `-lc++`/`-lstdc++`/`-lc++abi` link static. ffmpeg
-          # links via the C driver, so there's no implicit `-lc++` to worry
-          # about. See docs/dynamic-link-policy.md. (libSystem stays
-          # implicit-dynamic.)
-          ++ (if isDarwin then [
+          # `-Wl,-search_paths_first` so ld64 prefers a dep's `.a` over any
+          # same-named dylib beside it, instead of its default
+          # `-search_dylibs_first`. (libSystem stays implicit-dynamic.)
+          # See docs/dynamic-link-policy.md.
+          ++ (if isDarwin then ([
                 "--extra-ldflags=-Wl,-search_paths_first"
-                # See the linux `-lstdc++` note below: srt.pc (and other C++ deps
-                # found via require_pkg_config) omit the C++ runtime, so force it.
-                "--extra-libs=-lstdc++"
-                "--extra-libs=-lc++abi"
               ]
+              # Same token, same two roles, as the linux branch below; it is
+              # meaningful only with the postPatch rename, so it rides the same gate.
+              ++ pkgs.lib.optional isEngine "--extra-libs=-lc++")
               else if isMinGW then [
                 # mingw single-binary policy: fold the toolchain runtime
                 # (libgcc, libstdc++, libwinpthread, libmcfgthread) into
@@ -174,44 +157,40 @@
               ++ (if isEngine then [
                 # Engine mingw: `-static-libgcc`/`-static-libstdc++` name gcc
                 # runtimes that do not exist here, so the C++ deps had nothing
-                # holding their runtime — same gap the linux/darwin branches
-                # already close, just never reached on windows before this
-                # target moved onto the engine. It shows up as configure
-                # rejecting the FIRST C++ dep it probes through
-                # `require_pkg_config` ("chromaprint not found"): its `.pc` is
-                # `-lchromaprint` alone, the probe links with the C driver, and
-                # every `std::`/`__cxa_*` is undefined. Names, not `.a` paths —
-                # the cxx-static shim below is already on NIX_LDFLAGS.
+                # holding their runtime. It shows up as configure rejecting the
+                # FIRST C++ dep it probes through `require_pkg_config`
+                # ("chromaprint not found"): its `.pc` is `-lchromaprint` alone,
+                # the probe links with the C driver, and every `std::`/`__cxa_*`
+                # is undefined. See the `-lc++` note on the linux branch.
                 "--extra-libs=-lc++"
-                "--extra-libs=-lc++abi"
-                "--extra-libs=-lunwind"
               ] else [
                 "--extra-ldflags=-static-libgcc"
                 "--extra-ldflags=-static-libstdc++"
               ])
               else [ "--extra-ldflags=-static" "--enable-static" "--disable-shared" ]
-                # Engine linux: force the whole static C++ runtime onto every link.
-                # C++ codec deps split two ways: some ffmpeg detects with a
-                # hardcoded `-lstdc++` (libgme…), but others (srt) come via
-                # `require_pkg_config` and their `.pc` omits the C++ runtime
-                # entirely (srt.pc names its crypto but no `-lstdc++`), so
-                # every `std::__1::…` from srt.a is undefined. Append `-lc++`
-                # (→ libc++.a via the cxx-static shim) plus its `__cxa_*`/typeinfo
-                # (libc++abi) and `_Unwind_*` (LLVM libunwind), in dependency order.
-                # On a C-only dep's link these static archives simply aren't pulled.
+                # `-lc++` is the one C++ token every engine target passes, and it
+                # does two jobs at once.
                 #
-                # `-lc++` and not `-lstdc++` (the shim serves both from the same
-                # archive) because the name is also what tells the engine this link
-                # needs the C++ runtime: ffmpeg links with the C driver, and the
-                # musl front builds/points at `cxx/lib` only in C++ mode
-                # (`wantsCxx`, unpin_musl.cpp) — which `-lc++` satisfies. That is
-                # what makes `-lunwind` resolve from the ENGINE instead of from a
-                # copy staged here; see the cxx-static shim for why staging one
-                # breaks the fold. Same three tokens the windows branch uses.
+                # It marks the link as C++. ffmpeg drives its own links with the C
+                # compiler, so nothing would otherwise pull a C++ runtime for the
+                # C++ codec deps — some ffmpeg detects with a hardcoded runtime
+                # name (libgme…), others (srt) come via `require_pkg_config` with a
+                # `.pc` that omits the runtime entirely, and either way every
+                # `std::__1::…` ends up undefined. The engine driver reads `-lc++`
+                # as "this link is C++" (`wantsCxx`, unpin_musl.cpp) and answers
+                # with `-L<sysroot>/cxx/lib` plus libc++, libc++abi and libunwind
+                # from the ENGINE, inside one `--start-group` with libc and the
+                # builtins. So the three archives arrive on their own: naming them
+                # here would stage duplicates OUTSIDE that group, and a staged
+                # `-lunwind` in the build tree is exactly what the capture shim
+                # records as LOCALA, swallowing the unwinder into `module.bc` and
+                # colliding with the mega link's own copy.
+                #
+                # It is also ffbuild/common.mak's sentinel for "link this with
+                # $(CXX)" — the token is filtered back out before the linker sees
+                # it, and postPatch renames that sentinel from `-lstdc++` to match.
                 ++ pkgs.lib.optionals isEngine [
                   "--extra-libs=-lc++"
-                  "--extra-libs=-lc++abi"
-                  "--extra-libs=-lunwind"
                   # The 8 MB thread stack nix-lib gives the folded binary (musl's
                   # default is 128 KB; libaom and ffv1 overflowed it), so the
                   # binary the installCheck below runs behaves like the shipped one.
@@ -263,6 +242,37 @@
               substituteInPlace configure \
                 --replace-fail 'test_cc "$@" <<EOF && enable $name' \
                                'test_cc -DUNPIN_conftest=1 "$@" <<EOF && enable $name'
+
+              # The engine's C++ runtime is libc++; no `libstdc++.a` exists to be
+              # found, and aliasing one onto `libc++.a` would only hide that.
+              # ffmpeg spells the runtime `-lstdc++` in two distinct roles, so
+              # both are renamed.
+              #
+              # As a LINKER FLAG: its own `require` probes (libgme, libopenmpt,
+              # librubberband, libsnappy) hardcode it, and a dep's `.pc`
+              # `Libs.private` can contribute it under
+              # `--pkg-config-flags=--static`. `ldflags_filter` is the single
+              # point every flag bound for the linker passes through — probe
+              # flags AND libs in `test_ld`, `add_ldflags`/`add_extralibs`, and
+              # the per-library `EXTRALIBS` finally written to config.mak — so
+              # hooking it renames the token whatever its source, with no list of
+              # producers to keep. `-lc++` is also what tells the engine driver
+              # the link is C++ (see the `--extra-libs` note above).
+              substituteInPlace configure \
+                --replace-fail 'test "$cc_type" != "$ld_type" && add_ldflags $cc_ldflags' \
+                               'test "$cc_type" != "$ld_type" && add_ldflags $cc_ldflags
+              unpin_base_ldflags_filter=$_flags_filter
+              unpin_ldflags_filter(){ $unpin_base_ldflags_filter "$@" | sed -e "s/-lstdc++/-lc++/g"; }
+              ldflags_filter=unpin_ldflags_filter'
+
+              # As a SENTINEL: `-lstdc++` anywhere in a link's args means "link
+              # this one with $(CXX)", and the token is filtered back out before
+              # the linker sees it. Rename it to match, or ffmpeg's own binaries
+              # link with the C driver and every `std::` from the C++ deps is
+              # undefined.
+              substituteInPlace ffbuild/common.mak \
+                --replace-fail '$(if $(filter -lstdc++,$(1)),$(LDXX) $(filter-out -lstdc++,$(1)),$(LD) $(1))' \
+                               '$(if $(filter -lc++,$(1)),$(LDXX) $(filter-out -lc++,$(1)),$(LD) $(1))'
             ''
             # riscv64: musl's <bits/syscall.h> predates the riscv_hwprobe syscall
             # (Linux 6.4), but the cross kernel headers ship <asm/hwprobe.h>.
@@ -342,58 +352,6 @@
 
           configurePhase = ''
             runHook preConfigure
-            ${pkgs.lib.optionalString isEngine ''
-              # The engine's C++ runtime is libc++, but ffmpeg's configure probes
-              # (libgme/libopenmpt/librubberband/libsnappy `require`) and several
-              # dep `.pc` `Libs.private` hardcode `-lstdc++` (and `-lc++`/
-              # `-lc++abi`). With no `libstdc++.a` on the search path the libgme
-              # probe fails → `ERROR: libgme not found`. Expose the static libc++
-              # under all three names ahead of the default dirs so every such
-              # token links the engine's static libc++.
-              mkdir -p "$TMPDIR/cxx-static"
-              ${if isDarwin then ''
-                # darwin: the Itanium unwinder is in libSystem, so libc++/libc++abi
-                # suffice. ld64 also needs `-Wl,-search_paths_first` (added above)
-                # to prefer the `.a` over /usr/lib/libc++.1.dylib.
-                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
-                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
-                ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
-              '' else if isMinGW then ''
-                # windows: all four from the engine's own seeded sysroot. Reaching
-                # for `pkgs.libcxx` here means nixpkgs' MINGW libc++, and behind it
-                # nixpkgs' mingw clang wrapper and a mingw cross gcc — which this
-                # scope would build with the engine's lld, and gcc's libgcc_s.dll
-                # rule passes `-rpath-link`, an ELF flag lld's mingw driver rejects.
-                # It is the wrong libc++ besides: built against msvcrt with gcc,
-                # while everything on this link line is UCRT.
-                cxxlib=$(dirname "$(find "$XDG_CACHE_HOME/unpin-llvm" -path '*/cxx/lib/libunwind.a' 2>/dev/null | head -1)")
-                test -n "$cxxlib" || { echo "engine cxx sysroot not seeded"; exit 1; }
-                ln -sf "$cxxlib/libc++.a"    "$TMPDIR/cxx-static/libc++.a"
-                ln -sf "$cxxlib/libc++.a"    "$TMPDIR/cxx-static/libstdc++.a"
-                ln -sf "$cxxlib/libc++abi.a" "$TMPDIR/cxx-static/libc++abi.a"
-                ln -sf "$cxxlib/libunwind.a" "$TMPDIR/cxx-static/libunwind.a"
-              '' else ''
-                # linux: use the COMPLETE upstream static libc++/libc++abi from
-                # nixpkgs (the engine sysroot's on-demand `cxx/lib/libc++.a` is a
-                # re-archived subset — enough for libgme but missing the locale/
-                # iostream/random_device members srt's C++ pulls).
-                #
-                # `-lunwind` is NOT staged here. Its only provider is the engine's
-                # own `cxx/lib/libunwind.a` (nixpkgs `libunwind` is nongnu and lacks
-                # `_Unwind_*`; `llvmPackages.libunwind` is an empty stub), and the
-                # driver serves it: the `-lc++` in `--extra-libs` puts the musl front
-                # in C++ mode, which is what adds `cxx/lib` to -L. Staging a copy
-                # would cost the fold — this dir is in the BUILD TREE, so the capture
-                # shim records a resolved `-L$TMPDIR/cxx-static -lunwind` as LOCALA,
-                # `module.bc` swallows the unwinder, and it collides with the mega
-                # link's own `-lunwind` (`duplicate symbol: _Unwind_VRS_Get`, armv7l).
-                # Anything the engine supplies must reach the link via the engine.
-                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libc++.a"
-                ln -sf ${pkgs.libcxx}/lib/libc++.a    "$TMPDIR/cxx-static/libstdc++.a"
-                ln -sf ${pkgs.libcxx}/lib/libc++abi.a "$TMPDIR/cxx-static/libc++abi.a"
-              ''}
-              export NIX_LDFLAGS="-L$TMPDIR/cxx-static $NIX_LDFLAGS"
-            ''}
             # ffmpeg's `require_cpp_condition` for x264 trips on the
             # default x264.h header decoration; drop the check.
             sed -i '/X264_API_IMPORTS/d' configure
