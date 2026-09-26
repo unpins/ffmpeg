@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [8.1.2-1] - 2026-09-26
+
 ### Added
 
 - Builds now verify their own optimized code: on every platform where the build
