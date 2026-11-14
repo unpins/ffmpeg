@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux x86_64, i686 and aarch64, `libx265` ignored NUMA: on a machine
+  with several NUMA nodes it ran one thread pool across all of them instead of
+  one per node. NUMA support is back, as in nixpkgs.
+
 ## [8.1.2-1] - 2026-09-26
 
 ### Added
