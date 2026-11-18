@@ -506,7 +506,8 @@
           # Feature-disable fixes that the user signed off on (the
           # rationale lives in each fix file). srt and libssh run on the
           # OpenSSL ffmpeg links for TLS; rubberband drops
-          # side-target plugins; librist/qrencode skip broken tests;
+          # side-target plugins; librist skips broken tests; qrencode's
+          # darwin fixup drops a stray dylib;
           # libopenmpt + mpg123 drop CLI audio backends; soxr drops
           # openmp; libbluray renames `dec_init` + (darwin) drops
           # fontconfig.
@@ -514,7 +515,7 @@
           srtOpenssl      = (ulib.nativeFixes.srt       pkgsStaticScope).withOpenssl;
           libsshOpenssl   = ulib.nativeFixes.libssh     pkgsStaticScope;
           libristNoTest   = ulib.nativeFixes.librist    pkgsStaticScope;
-          qrencodeNoCheck = ulib.nativeFixes.qrencode   pkgsStaticScope;
+          qrencodeStatic  = ulib.nativeFixes.qrencode   pkgsStaticScope;
           rubberbandLean  = ulib.nativeFixes.rubberband pkgsStaticScope;
           libbluraySafe   = ulib.nativeFixes.libbluray  pkgsStaticScope;
           libopenmptLean  = ulib.nativeFixes.libopenmpt pkgsStaticScope;
@@ -591,7 +592,7 @@
             twolame
             opencore-amr
             zvbi         zvbi.dev
-          ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtOpenssl xvidStatic libsshOpenssl libsshOpenssl.dev libbluraySafe libristNoTest qrencodeNoCheck qrencodeNoCheck.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ]
+          ]) ++ [ svtAv1NoLto x265Static x265Static.dev soxrNoOmp soxrNoOmp.dev srtOpenssl xvidStatic libsshOpenssl libsshOpenssl.dev libbluraySafe libristNoTest qrencodeStatic qrencodeStatic.dev rubberbandLean chromaprintLean gmeStatic libopenmptLean libopenmptLean.dev quircStatic speexPkg speexPkg.dev vidStabPkg ]
             ++ (with pkgsStaticScope; [
               freetype  freetype.dev
               fribidi   fribidi.dev
