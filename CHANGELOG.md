@@ -16,6 +16,11 @@
   with several NUMA nodes it ran one thread pool across all of them instead of
   one per node. NUMA support is back, as in nixpkgs.
 
+- Built with Nix, the cross-compiled binaries (Linux i686 and armv7l among
+  them) kept the build machine's C compiler as a runtime dependency, because
+  the build configuration `-version` prints named its path. The downloadable
+  release binaries were not affected.
+
 ## [8.1.2-1] - 2026-09-26
 
 ### Added
