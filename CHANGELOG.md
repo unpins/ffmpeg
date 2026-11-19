@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- On Linux, ALSA input and output (`-f alsa`) did not work: they stopped with
+  `Cannot access file …/alsa.conf`, because the binary looked for ALSA's
+  configuration in a directory that only existed on the build machine. That
+  configuration is now built into the binary, and the `default`, `pipewire`
+  and `pulse` devices reach PipeWire or PulseAudio, as on a desktop where
+  ALSA routes through them. `/etc/asound.conf`, `/etc/alsa/conf.d` and
+  `~/.asoundrc` still apply.
+
 - On Linux x86_64, i686 and aarch64, `libx265` ignored NUMA: on a machine
   with several NUMA nodes it ran one thread pool across all of them instead of
   one per node. NUMA support is back, as in nixpkgs.

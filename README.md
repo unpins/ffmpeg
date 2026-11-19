@@ -92,6 +92,8 @@ These rely on Linux kernel interfaces:
 - **x11grab** — X11 screen capture via libxcb
 - **CD audio** — libcdio + libcdio-paranoia
 - **Terminal output** — libcaca (`caca` output device)
+- **ALSA** — audio input and output (`-f alsa`), reaching PipeWire and
+  PulseAudio through ALSA's `default`, `pipewire` and `pulse` devices
 
 ## Build notes
 
@@ -100,6 +102,9 @@ These rely on Linux kernel interfaces:
   Linux and macOS. On Windows, and on a system with none installed, the binary
   uses the Mozilla root certificates built into it. `-ca_file` (or the
   `SSL_CERT_FILE` environment variable) selects another bundle.
+- **ALSA** on Linux: ALSA's standard configuration is built into the binary,
+  so it works without the system's `/usr/share/alsa`. Your own settings in
+  `/etc/asound.conf`, `/etc/alsa/conf.d` and `~/.asoundrc` still apply.
 - **Not included:** `ffplay`; hardware acceleration (VAAPI, VDPAU, NVENC,
   VideoToolbox, Vulkan), which loads vendor drivers at run time; GnuTLS and
   libsmbclient; and the libjxl, libgsm, openh264, rav1e, kvazaar,
